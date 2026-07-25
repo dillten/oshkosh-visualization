@@ -64,7 +64,7 @@ html, body, #map { height: 100%; width: 100%; background: var(--page); overflow:
 }
 #play:hover { background: rgba(255, 255, 255, 0.08); }
 #scrub { flex: 1; accent-color: var(--inbound); }
-#speed {
+#speed, #colorby {
   background: var(--surface-1);
   color: var(--text-secondary);
   border: 1px solid var(--border);
@@ -72,3 +72,85 @@ html, body, #map { height: 100%; width: 100%; background: var(--page); overflow:
   padding: 4px 6px;
   font-size: 12px;
 }
+#stats-toggle {
+  background: none;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+#stats-toggle:hover { background: rgba(255, 255, 255, 0.08); }
+
+#stats-panel {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  bottom: 76px;
+  width: min(360px, calc(100% - 32px));
+  background: color-mix(in srgb, var(--surface-1) 92%, transparent);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text-primary);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+#stats-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px 8px;
+}
+#stats-head h2 { font-size: 14px; font-weight: 600; }
+#stats-close {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 14px;
+  cursor: pointer;
+}
+#stats-body { overflow-y: auto; padding: 0 16px 16px; }
+#stats-body h3 {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  margin: 16px 0 6px;
+}
+.stat-tiles { display: flex; gap: 8px; margin-top: 4px; }
+.tile {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+.tile-num { font-size: 18px; font-weight: 700; }
+.tile-cap { font-size: 11px; color: var(--text-secondary); }
+.chart { display: flex; flex-direction: column; gap: 3px; }
+.bar-row, .day-group { display: flex; align-items: center; gap: 8px; font-size: 11px; }
+.bar-label {
+  width: 52px;
+  flex-shrink: 0;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.bar-track {
+  flex: 1;
+  height: 8px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 3px;
+  overflow: hidden;
+  display: block;
+}
+.bar-track i { display: block; height: 100%; border-radius: 3px; }
+.bar-val { width: 58px; flex-shrink: 0; text-align: right; font-variant-numeric: tabular-nums; color: var(--text-secondary); }
+.day-bars { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.chart-note { font-size: 11px; color: var(--muted); margin-top: 6px; display: flex; align-items: center; gap: 4px; }
+

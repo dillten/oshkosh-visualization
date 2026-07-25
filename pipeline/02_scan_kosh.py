@@ -48,6 +48,7 @@ def kosh_hits(doc: dict) -> dict | None:
     base_ts = doc["timestamp"]
     first_ts = last_ts = None
     min_dist = 1e9
+    min_alt = None
     saw_ground = False
     n_hits = 0
     for p in doc["trace"]:
@@ -56,8 +57,15 @@ def kosh_hits(doc: dict) -> dict | None:
             continue
         alt = p[3]
         on_ground = alt == "ground"
-        if not on_ground and isinstance(alt, (int, float)) and alt > KOSH_ALT_CEILING_FT:
-            continue
+        if not on_ground:
+            # altitude must be KNOWN and low — unknown-alt points are how
+            # cruising overflights sneak in (baro alt with geom fallback)
+            alt_val = alt if isinstance(alt, (int, float)) else (
+                p[10] if len(p) > 10 and isinstance(p[10], (int, float)) else None
+            )
+            if alt_val is None or alt_val > KOSH_ALT_CEILING_FT:
+                continue
+            min_alt = alt_val if min_alt is None else min(min_alt, alt_val)
         dlat = (lat - KOSH_LAT) * NM_PER_DEG_LAT
         dlon = (lon - KOSH_LON) * NM_PER_DEG_LAT * COS_LAT
         dist = math.hypot(dlat, dlon)
@@ -70,12 +78,14 @@ def kosh_hits(doc: dict) -> dict | None:
         min_dist = min(min_dist, dist)
         saw_ground = saw_ground or on_ground
         n_hits += 1
-    if first_ts is None:
+    # a single qualifying point is more likely a glitch than a visit
+    if first_ts is None or n_hits < 2:
         return None
     return {
         "first_ts": first_ts,
         "last_ts": last_ts,
         "min_dist_nm": round(min_dist, 2),
+        "min_alt_ft": -1 if saw_ground else int(min_alt) if min_alt is not None else None,
         "saw_ground": saw_ground,
         "n_hits": n_hits,
     }
