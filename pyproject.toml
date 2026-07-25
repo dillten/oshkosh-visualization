@@ -1,0 +1,12 @@
+[project]
+name = "oshkosh-pipeline"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = [
+    "duckdb>=1.5.5",
+    "orjson>=3.11.9",
+    "pandas>=3.0.5",
+    "pyarrow>=25.0.0",
+    "requests>=2.34.2",
+    "scipy>=1.18.0",
+]
