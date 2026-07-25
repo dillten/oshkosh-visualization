@@ -2,7 +2,7 @@ import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { MapboxOverlay } from "@deck.gl/mapbox";
 import { TripsLayer } from "@deck.gl/geo-layers";
-import { PathLayer, ScatterplotLayer, TextLayer } from "@deck.gl/layers";
+import { ScatterplotLayer, TextLayer } from "@deck.gl/layers";
 
 type RGB = [number, number, number];
 
@@ -70,6 +70,14 @@ interface Manifest {
 
 interface Segment {
   meta: JourneyMeta;
+  path: [number, number][];
+  timestamps: number[];
+  t0: number;
+  t1: number;
+}
+
+interface LegSegment {
+  leg: AircraftLeg;
   path: [number, number][];
   timestamps: number[];
   t0: number;
@@ -217,6 +225,76 @@ function colorFor(meta: JourneyMeta, mode: ColorMode): RGB {
   return REGION_COLORS[meta.region] ?? REGION_COLORS.Unknown;
 }
 
+interface TimeLayerStyle {
+  breadcrumbOpacity?: number;
+  trailOpacity?: number;
+  trailWidth?: number;
+  trailLength?: number;
+}
+
+/**
+ * Renders a (sub)set of trips either as a single fully-revealed static path
+ * (frozen — the "here's the whole route" entry view for a fresh selection)
+ * or as the usual dim-breadcrumb + fading-trail pair driven by the live
+ * playhead (once the user hits play or drags the slider). `windowEnd` is the
+ * global T1 — used as the "reveal" currentTime since every timestamp in any
+ * subset is expressed relative to the same window start.
+ */
+function timeLayers<T>(
+  idPrefix: string,
+  data: T[],
+  getPath: (d: T) => [number, number][],
+  getTimestamps: (d: T) => number[],
+  getColor: (d: T) => RGB,
+  frozen: boolean,
+  t: number,
+  windowEnd: number,
+  style: TimeLayerStyle = {}
+) {
+  if (frozen) {
+    return [
+      new TripsLayer<T>({
+        id: `${idPrefix}-reveal`,
+        data,
+        getPath,
+        getTimestamps,
+        getColor,
+        currentTime: windowEnd,
+        trailLength: windowEnd,
+        fadeTrail: false,
+        widthMinPixels: style.trailWidth ?? 2,
+        opacity: style.trailOpacity ?? 0.85,
+      }),
+    ];
+  }
+  return [
+    new TripsLayer<T>({
+      id: `${idPrefix}-breadcrumb`,
+      data,
+      getPath,
+      getTimestamps,
+      getColor,
+      currentTime: t,
+      trailLength: windowEnd,
+      fadeTrail: false,
+      widthMinPixels: 1,
+      opacity: style.breadcrumbOpacity ?? 0.15,
+    }),
+    new TripsLayer<T>({
+      id: `${idPrefix}-trail`,
+      data,
+      getPath,
+      getTimestamps,
+      getColor,
+      currentTime: t,
+      trailLength: style.trailLength ?? 1200,
+      fadeTrail: true,
+      widthMinPixels: style.trailWidth ?? 2,
+      opacity: style.trailOpacity ?? 0.9,
+    }),
+  ];
+}
+
 function renderLegend(mode: ColorMode) {
   const el = document.getElementById("legend")!;
   const entries =
@@ -339,6 +417,10 @@ async function main() {
   let speed = 1800;
   let colorMode: ColorMode = "dir";
   let selection: Selection | null = null;
+  // A fresh selection starts "frozen" (full route revealed, clock paused).
+  // Pressing play or dragging the slider unfreezes it so play/scrub animate
+  // within the filtered subset instead of clearing the selection.
+  let selectionFrozen = true;
   let lastFrame = performance.now();
 
   // ----- radar overlay (opt-in; NEXRAD CONUS composite via IEM Mesonet) -----
@@ -418,13 +500,44 @@ async function main() {
       playBtn.textContent = "▶";
     }
     selection = sel;
+    selectionFrozen = true;
     selectionBar.hidden = false;
     selectionLabel.textContent = label;
     render(current);
   }
 
+  function selectionMatchHexes(): Set<string> | null {
+    if (!selection) return null;
+    if (selection.kind === "aircraft") return new Set([selection.hex]);
+    if (selection.kind === "airport") return new Set(selection.detail.touches.map((tt) => tt.hex));
+    return new Set(selection.matches.map((m) => m.hex));
+  }
+
+  function selectionTotalCount(): number {
+    if (!selection) return 0;
+    if (selection.kind === "aircraft") return selection.detail.legs.length;
+    if (selection.kind === "airport") return selection.detail.touches.length;
+    return selection.matches.length;
+  }
+
+  function selectionActiveCount(t: number): number {
+    if (!selection) return 0;
+    if (selection.kind === "aircraft") {
+      return selection.detail.legs.filter((l) => {
+        const t0 = l.path[0]?.[0];
+        const t1 = l.path[l.path.length - 1]?.[0];
+        return t0 !== undefined && t0 <= t && t <= t1;
+      }).length;
+    }
+    const hexes = selectionMatchHexes()!;
+    let n = 0;
+    for (const s of segments) if (hexes.has(s.meta.hex) && s.t0 <= t && t <= s.t1) n++;
+    return n;
+  }
+
   function clearSelection() {
     selection = null;
+    selectionFrozen = true;
     selectionBar.hidden = true;
     playing = wasPlayingBeforeSelection;
     playBtn.textContent = playing ? "⏸" : "▶";
@@ -494,33 +607,36 @@ async function main() {
     }
 
     // Selection active: isolate — background layers are replaced entirely by
-    // just the matching content, at full static opacity (not time-scrubbed).
-    // (Dimming the full 8040-journey layer in place doesn't work: thousands
-    // of overlapping semi-transparent lines alpha-stack back up to looking
-    // nearly full-brightness, so we drop the background layers instead.)
+    // just the matching content. (Dimming the full 8040-journey layer in
+    // place doesn't work: thousands of overlapping semi-transparent lines
+    // alpha-stack back up to looking nearly full-brightness, so we drop the
+    // background layers instead.) A fresh selection starts frozen (whole
+    // route revealed at once); once play/scrub is used it switches to the
+    // normal breadcrumb+fading-trail animation, scoped to just this subset.
     const extraLayers: any[] = [];
 
     if (selection.kind === "aircraft") {
       const det = selection.detail;
-      const legPaths = det.legs.map((leg) => ({
-        leg,
-        path: leg.path.map((p) => [p[1], p[2]] as [number, number]),
-      }));
+      const legSegments: LegSegment[] = det.legs.map((leg) => {
+        const path = leg.path.map((p) => [p[1], p[2]] as [number, number]);
+        const timestamps = leg.path.map((p) => p[0]);
+        return { leg, path, timestamps, t0: timestamps[0], t1: timestamps[timestamps.length - 1] };
+      });
       extraLayers.push(
-        new PathLayer({
-          id: "aircraft-path",
-          data: legPaths,
-          getPath: (d: any) => d.path,
-          getColor: (d: any) =>
-            d.leg.to === "KOSH" ? KOSH_LEG : d.leg.from === "KOSH" ? DEP_LEG : HIGHLIGHT_LEG,
-          getWidth: 3,
-          widthMinPixels: 3,
-          capRounded: true,
-          jointRounded: true,
-        }),
+        ...timeLayers<LegSegment>(
+          "aircraft",
+          legSegments,
+          (d) => d.path,
+          (d) => d.timestamps,
+          (d) => (d.leg.to === "KOSH" ? KOSH_LEG : d.leg.from === "KOSH" ? DEP_LEG : HIGHLIGHT_LEG),
+          selectionFrozen,
+          t,
+          T1,
+          { breadcrumbOpacity: 0.25, trailOpacity: 0.95, trailWidth: 3, trailLength: 1800 }
+        ),
         new ScatterplotLayer({
           id: "aircraft-stops",
-          data: legPaths.flatMap((d) => [d.path[0], d.path[d.path.length - 1]]),
+          data: legSegments.flatMap((d) => [d.path[0], d.path[d.path.length - 1]]),
           getPosition: (d: [number, number]) => d,
           getFillColor: [255, 255, 255, 230],
           getLineColor: [11, 11, 11, 200],
@@ -538,19 +654,17 @@ async function main() {
       );
       const matched = segments.filter((s) => hexes.has(s.meta.hex));
       extraLayers.push(
-        new TripsLayer<Segment>({
-          id: "matched",
-          data: matched,
-          getPath: (d) => d.path,
-          getTimestamps: (d) => d.timestamps,
-          getColor: (d) => colorFor(d.meta, colorMode),
-          currentTime: T1,
-          trailLength: T1,
-          fadeTrail: false,
-          widthMinPixels: 2,
-          opacity: 0.85,
-          updateTriggers: { getColor: colorMode },
-        })
+        ...timeLayers<Segment>(
+          "matched",
+          matched,
+          (d) => d.path,
+          (d) => d.timestamps,
+          (d) => colorFor(d.meta, colorMode),
+          selectionFrozen,
+          t,
+          T1,
+          { breadcrumbOpacity: 0.15, trailOpacity: 0.9, trailWidth: 2, trailLength: 1200 }
+        )
       );
       if (selection.kind === "airport" && selection.detail.lat != null) {
         extraLayers.push(
@@ -582,9 +696,13 @@ async function main() {
     updateRadar(t);
     setRadarVisible(radarEnabled && !selection);
     clock.textContent = fmtClock(manifest.window_start + t) + " CDT";
-    counts.textContent = selection
-      ? "Inspecting selection — clear to resume the timelapse"
-      : `${activeCount(t)} aircraft in motion · ${journeys.length} journeys total`;
+    if (selection) {
+      counts.textContent = selectionFrozen
+        ? "Showing the full route — press play or drag the slider to animate it"
+        : `${selectionActiveCount(t)} active of ${selectionTotalCount()} matching`;
+    } else {
+      counts.textContent = `${activeCount(t)} aircraft in motion · ${journeys.length} journeys total`;
+    }
     scrub.value = String(Math.floor(t));
   }
 
@@ -607,7 +725,7 @@ async function main() {
   }
 
   playBtn.addEventListener("click", () => {
-    if (selection) clearSelection();
+    if (selection) selectionFrozen = false;
     playing = !playing;
     playBtn.textContent = playing ? "⏸" : "▶";
   });
@@ -618,7 +736,7 @@ async function main() {
     }
   });
   scrub.addEventListener("input", () => {
-    if (selection) clearSelection();
+    if (selection) selectionFrozen = false;
     current = Number(scrub.value);
     render(current);
   });
