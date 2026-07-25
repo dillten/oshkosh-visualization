@@ -23,12 +23,6 @@ const KOSH_LEG: RGB = [57, 135, 229];
 const DEP_LEG: RGB = [217, 89, 38];
 const SELECT_MARKER: RGB = [237, 161, 0]; // #eda100
 
-// Altitude tilt: exaggerated so the descent reads clearly against horizontal
-// distances of hundreds of km (a true 1:1 scale would be imperceptibly flat).
-const FT_TO_M = 0.3048;
-const ALT_EXAGGERATION = 12;
-const TILT_PITCH = 55;
-
 // IEM NEXRAD CONUS composite (n0r): 5-min cadence PNG archive, CORS-open,
 // fixed bounds/size for the whole archive (EPSG:4326, 0.01 deg/px).
 const RADAR_BUCKET_S = 300;
@@ -145,7 +139,7 @@ interface Segment {
   t1: number;
 }
 
-type Position = [number, number] | [number, number, number];
+type Position = [number, number];
 
 interface LegSegment {
   leg: AircraftLeg;
@@ -672,17 +666,12 @@ async function main() {
   // ----- day/night terminator (opt-in) -----
   let nightEnabled = !!initial.night;
 
-  // ----- altitude tilt (opt-in, only meaningful for an aircraft selection) -----
-  let tiltEnabled = false;
-
   const playBtn = document.getElementById("play") as HTMLButtonElement;
   const scrub = document.getElementById("scrub") as HTMLInputElement;
   const speedSel = document.getElementById("speed") as HTMLSelectElement;
   const colorSel = document.getElementById("colorby") as HTMLSelectElement;
   const radarToggle = document.getElementById("radar-toggle") as HTMLInputElement;
   const nightToggle = document.getElementById("night-toggle") as HTMLInputElement;
-  const tiltToggle = document.getElementById("tilt-toggle") as HTMLInputElement;
-  const tiltLabel = document.getElementById("tilt-label") as HTMLElement;
   const linkBtn = document.getElementById("link-toggle") as HTMLButtonElement;
   const clock = document.getElementById("clock")!;
   const counts = document.getElementById("counts")!;
@@ -725,19 +714,6 @@ async function main() {
 
   // ----- selection lifecycle -----
 
-  function setTilt(enabled: boolean) {
-    tiltEnabled = enabled;
-    tiltToggle.checked = enabled;
-    if (enabled && map.getZoom() < 7) {
-      // A pitched camera barely reads at continental zoom (a flat vector
-      // map just looks the same tilted or not) — jump to a close-in view
-      // over KOSH so the 3D descent effect is actually visible immediately.
-      map.easeTo({ pitch: TILT_PITCH, zoom: 9, center: manifest.kosh, duration: 900 });
-    } else {
-      map.easeTo({ pitch: enabled ? TILT_PITCH : 0, duration: 600 });
-    }
-  }
-
   function enterSelection(sel: Selection, label: string) {
     if (!selection) {
       wasPlayingBeforeSelection = playing;
@@ -748,8 +724,6 @@ async function main() {
     selectionFrozen = true;
     selectionBar.hidden = false;
     selectionLabel.textContent = label;
-    tiltLabel.hidden = sel.kind !== "aircraft";
-    if (sel.kind !== "aircraft" && tiltEnabled) setTilt(false);
     render(current);
     updateUrl();
   }
@@ -787,8 +761,6 @@ async function main() {
     selection = null;
     selectionFrozen = true;
     selectionBar.hidden = true;
-    tiltLabel.hidden = true;
-    if (tiltEnabled) setTilt(false);
     playing = wasPlayingBeforeSelection;
     playBtn.textContent = playing ? "⏸" : "▶";
     render(current);
@@ -885,9 +857,7 @@ async function main() {
     if (selection.kind === "aircraft") {
       const det = selection.detail;
       const legSegments: LegSegment[] = det.legs.map((leg) => {
-        const path: Position[] = leg.path.map((p) =>
-          tiltEnabled ? [p[1], p[2], Math.max(0, p[3]) * FT_TO_M * ALT_EXAGGERATION] : [p[1], p[2]]
-        );
+        const path: Position[] = leg.path.map((p) => [p[1], p[2]]);
         const timestamps = leg.path.map((p) => p[0]);
         return { leg, path, timestamps, t0: timestamps[0], t1: timestamps[timestamps.length - 1] };
       });
@@ -1021,11 +991,6 @@ async function main() {
     render(current);
     updateUrl();
   });
-  tiltToggle.addEventListener("change", () => {
-    setTilt(tiltToggle.checked);
-    render(current);
-  });
-
   function frame(now: number) {
     const dt = (now - lastFrame) / 1000;
     lastFrame = now;
