@@ -10,7 +10,9 @@ Output (viz/public/data/):
 Uses the same window_start as manifest.json (05_export_viz.py) so the front
 end can share one clock. Paths are downsampled per leg (capped, adaptive)
 since a single-aircraft detail view can afford more points than the
-all-aircraft timelapse.
+all-aircraft timelapse. Each path point is [t_rel, lon, lat, alt_ft] — the
+altitude field (unused by the main timelapse, which stays 2D) powers the
+optional 3D tilt view when a single aircraft is selected.
 """
 
 import json
@@ -56,7 +58,7 @@ def main() -> None:
     con.execute(
         f"""
         create temp table pts as
-        select hex, ts, lat, lon, track
+        select hex, ts, lat, lon, track, cast(alt_ft as double) as alt_ft
         from read_parquet('{traces_glob}')
         order by hex, ts
         """
@@ -71,11 +73,14 @@ def main() -> None:
     index = []
     n = 0
     for hexid, hex_legs in legs_by_hex.items():
-        df = con.execute("select ts, lat, lon, track from pts where hex = ? order by ts", [hexid]).df()
+        df = con.execute(
+            "select ts, lat, lon, track, alt_ft from pts where hex = ? order by ts", [hexid]
+        ).df()
         ts_all = df["ts"].to_numpy()
         lat_all = df["lat"].to_numpy()
         lon_all = df["lon"].to_numpy()
         trk_all = df["track"].to_numpy(dtype=np.float64)
+        alt_all = df["alt_ft"].to_numpy(dtype=np.float64)
 
         leg_out = []
         for leg_idx, t_start, t_end, from_apt, to_apt, path_nm in hex_legs:
@@ -83,6 +88,7 @@ def main() -> None:
             if m.sum() < 2:
                 continue
             jts, jlat, jlon, jtrk = ts_all[m], lat_all[m], lon_all[m], trk_all[m]
+            jalt = alt_all[m]
             bounds = split_segments(jts, jlat, jlon)
             path = []
             for s, e in zip(bounds[:-1], bounds[1:]):
@@ -90,8 +96,15 @@ def main() -> None:
                     continue
                 i = downsample_capped(jts[s:e], jlat[s:e], jlon[s:e], jtrk[s:e], MAX_PTS_PER_LEG)
                 for k in i:
+                    a = jalt[s:e][k]
+                    alt_ft = 0.0 if np.isnan(a) or a < 0 else float(a)
                     path.append(
-                        [round(float(jts[s:e][k]) - window_start, 1), round(float(jlon[s:e][k]), 5), round(float(jlat[s:e][k]), 5)]
+                        [
+                            round(float(jts[s:e][k]) - window_start, 1),
+                            round(float(jlon[s:e][k]), 5),
+                            round(float(jlat[s:e][k]), 5),
+                            round(alt_ft),
+                        ]
                     )
             leg_out.append(
                 {
