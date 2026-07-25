@@ -13,13 +13,16 @@
 * { margin: 0; box-sizing: border-box; }
 
 html, body, #map { height: 100%; width: 100%; background: var(--page); overflow: hidden; }
+#map { position: relative; z-index: 0; }
 
 #hud {
   position: absolute;
   top: 16px;
   left: 16px;
+  z-index: 10;
+  isolation: isolate;
   color: var(--text-primary);
-  background: color-mix(in srgb, var(--surface-1) 82%, transparent);
+  background: color-mix(in srgb, var(--surface-1) 97%, transparent);
   backdrop-filter: blur(6px);
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -44,11 +47,13 @@ html, body, #map { height: 100%; width: 100%; background: var(--page); overflow:
   bottom: 20px;
   left: 50%;
   transform: translateX(-50%);
+  z-index: 10;
+  isolation: isolate;
   display: flex;
   align-items: center;
   gap: 12px;
   width: min(720px, calc(100% - 40px));
-  background: color-mix(in srgb, var(--surface-1) 85%, transparent);
+  background: color-mix(in srgb, var(--surface-1) 97%, transparent);
   backdrop-filter: blur(6px);
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -100,8 +105,10 @@ html, body, #map { height: 100%; width: 100%; background: var(--page); overflow:
   top: 16px;
   right: 16px;
   bottom: 76px;
+  z-index: 10;
+  isolation: isolate;
   width: min(380px, calc(100% - 32px));
-  background: color-mix(in srgb, var(--surface-1) 92%, transparent);
+  background: color-mix(in srgb, var(--surface-1) 98%, transparent);
   backdrop-filter: blur(8px);
   border: 1px solid var(--border);
   border-radius: 10px;
