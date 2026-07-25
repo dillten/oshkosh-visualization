@@ -72,7 +72,7 @@ html, body, #map { height: 100%; width: 100%; background: var(--page); overflow:
 }
 #play:hover { background: rgba(255, 255, 255, 0.08); }
 #scrub { flex: 1 1 160px; min-width: 100px; accent-color: var(--inbound); }
-#speed, #colorby {
+#speed, #colorby, #dirby, #dayby {
   background: var(--surface-1);
   color: var(--text-secondary);
   border: 1px solid var(--border);
