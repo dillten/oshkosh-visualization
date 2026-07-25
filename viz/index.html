@@ -15,6 +15,7 @@
         <div id="counts">loading…</div>
       </div>
       <div id="legend"></div>
+      <label id="radar-credit" hidden>Radar: NOAA NEXRAD via IEM Mesonet</label>
     </div>
     <div id="controls">
       <button id="play" title="Play/pause (space)">⏸</button>
@@ -30,6 +31,9 @@
         <option value="dir" selected>Direction</option>
         <option value="region">Origin region</option>
       </select>
+      <label id="radar-label" title="Overlay historical NEXRAD weather radar">
+        <input type="checkbox" id="radar-toggle" /> Radar
+      </label>
       <button id="explore-toggle" title="Explore">Explore</button>
     </div>
     <aside id="explore-panel" hidden>

@@ -23,6 +23,23 @@ const KOSH_LEG: RGB = [57, 135, 229];
 const DEP_LEG: RGB = [217, 89, 38];
 const SELECT_MARKER: RGB = [237, 161, 0]; // #eda100
 
+// IEM NEXRAD CONUS composite (n0r): 5-min cadence PNG archive, CORS-open,
+// fixed bounds/size for the whole archive (EPSG:4326, 0.01 deg/px).
+const RADAR_BUCKET_S = 300;
+const RADAR_BOUNDS: [[number, number], [number, number], [number, number], [number, number]] = [
+  [-126, 50], // NW
+  [-66, 50], // NE
+  [-66, 24], // SE
+  [-126, 24], // SW
+];
+function radarUrl(epochS: number): string {
+  const d = new Date(Math.floor(epochS / RADAR_BUCKET_S) * RADAR_BUCKET_S * 1000);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const y = d.getUTCFullYear(), m = pad(d.getUTCMonth() + 1), day = pad(d.getUTCDate());
+  const hm = pad(d.getUTCHours()) + pad(d.getUTCMinutes());
+  return `https://mesonet.agron.iastate.edu/archive/data/${y}/${m}/${day}/GIS/uscomp/n0r_${y}${m}${day}${hm}.png`;
+}
+
 // ---------- data shapes ----------
 
 interface JourneyMeta {
@@ -324,10 +341,41 @@ async function main() {
   let selection: Selection | null = null;
   let lastFrame = performance.now();
 
+  // ----- radar overlay (opt-in; NEXRAD CONUS composite via IEM Mesonet) -----
+  let radarEnabled = false;
+  let radarReady = false;
+  let lastRadarBucket = -1;
+  map.on("load", () => {
+    map.addSource("radar", {
+      type: "image",
+      url: radarUrl(manifest.window_start),
+      coordinates: RADAR_BOUNDS,
+    });
+    map.addLayer({
+      id: "radar-layer",
+      type: "raster",
+      source: "radar",
+      paint: { "raster-opacity": 0.55, "raster-fade-duration": 200 },
+      layout: { visibility: "none" },
+    });
+    radarReady = true;
+  });
+
+  function updateRadar(t: number) {
+    if (!radarReady || !radarEnabled || selection) return;
+    const epoch = manifest.window_start + t;
+    const bucket = Math.floor(epoch / RADAR_BUCKET_S);
+    if (bucket === lastRadarBucket) return;
+    lastRadarBucket = bucket;
+    const src = map.getSource("radar") as maplibregl.ImageSource | undefined;
+    src?.updateImage({ url: radarUrl(epoch) });
+  }
+
   const playBtn = document.getElementById("play") as HTMLButtonElement;
   const scrub = document.getElementById("scrub") as HTMLInputElement;
   const speedSel = document.getElementById("speed") as HTMLSelectElement;
   const colorSel = document.getElementById("colorby") as HTMLSelectElement;
+  const radarToggle = document.getElementById("radar-toggle") as HTMLInputElement;
   const clock = document.getElementById("clock")!;
   const counts = document.getElementById("counts")!;
   const explorePanel = document.getElementById("explore-panel") as HTMLElement;
@@ -524,14 +572,28 @@ async function main() {
     return [...extraLayers, ...koshLayers];
   }
 
+  function setRadarVisible(visible: boolean) {
+    if (!radarReady) return;
+    map.setLayoutProperty("radar-layer", "visibility", visible ? "visible" : "none");
+  }
+
   function render(t: number) {
     overlay.setProps({ layers: makeLayers(t) });
+    updateRadar(t);
+    setRadarVisible(radarEnabled && !selection);
     clock.textContent = fmtClock(manifest.window_start + t) + " CDT";
     counts.textContent = selection
       ? "Inspecting selection — clear to resume the timelapse"
       : `${activeCount(t)} aircraft in motion · ${journeys.length} journeys total`;
     scrub.value = String(Math.floor(t));
   }
+
+  radarToggle.addEventListener("change", () => {
+    radarEnabled = radarToggle.checked;
+    document.getElementById("radar-credit")!.hidden = !radarEnabled;
+    if (radarEnabled) lastRadarBucket = -1; // force a fetch for the current bucket
+    render(current);
+  });
 
   function frame(now: number) {
     const dt = (now - lastFrame) / 1000;

@@ -32,6 +32,8 @@ html, body, #map { height: 100%; width: 100%; background: var(--page); overflow:
 #counts { font-size: 12px; color: var(--text-secondary); margin-top: 4px; }
 
 #legend { display: flex; gap: 14px; margin-top: 10px; font-size: 12px; color: var(--text-secondary); }
+#radar-credit { display: block; font-size: 10px; color: var(--muted); margin-top: 8px; }
+#radar-credit[hidden] { display: none; }
 .key { display: inline-flex; align-items: center; gap: 6px; }
 .swatch { width: 14px; height: 3px; border-radius: 2px; display: inline-block; }
 .swatch.inbound { background: var(--inbound); }
@@ -72,6 +74,16 @@ html, body, #map { height: 100%; width: 100%; background: var(--page); overflow:
   padding: 4px 6px;
   font-size: 12px;
 }
+#radar-label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  cursor: pointer;
+}
+#radar-label input { accent-color: var(--inbound); cursor: pointer; }
 #explore-toggle {
   background: none;
   color: var(--text-secondary);
