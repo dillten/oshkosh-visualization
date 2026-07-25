@@ -178,8 +178,18 @@ def segment_hex(ts, lat, lon, alt, flags, snapper: AirportSnapper) -> list[dict]
     ts, lat, lon, alt, flags = ts[keep], lat[keep], lon[keep], alt[keep], flags[keep]
 
     new_leg = (flags.astype(np.int64) & 2) != 0
-    gap = np.concatenate([[False], np.diff(ts) > LEG_GAP_SPLIT_S])
-    starts = np.flatnonzero(new_leg | gap)
+    dt = np.diff(ts)
+    gap = np.concatenate([[False], dt > LEG_GAP_SPLIT_S])
+    # A single bad GPS/decode point mid-leg (implied speed > TELEPORT_KT)
+    # would otherwise inflate that leg's summed path_nm by thousands of nm
+    # without ever showing up as a gap or a new-leg flag — force a split so
+    # the glitch becomes its own (later-discarded, too-short) leg instead.
+    dlat = (lat[1:] - lat[:-1]) * NM_PER_DEG_LAT
+    dlon = (lon[1:] - lon[:-1]) * NM_PER_DEG_LAT * COS_KOSH
+    dnm = np.hypot(dlat, dlon)
+    speed = np.divide(dnm * 3600, dt, out=np.zeros_like(dnm), where=dt > 0)
+    teleport = np.concatenate([[False], (speed > TELEPORT_KT) & (dnm > 5)])
+    starts = np.flatnonzero(new_leg | gap | teleport)
     bounds = np.concatenate([[0], starts, [len(ts)]])
     bounds = np.unique(bounds)
 
