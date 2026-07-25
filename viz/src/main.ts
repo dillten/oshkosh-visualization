@@ -2,7 +2,7 @@ import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { MapboxOverlay } from "@deck.gl/mapbox";
 import { TripsLayer } from "@deck.gl/geo-layers";
-import { ScatterplotLayer, TextLayer } from "@deck.gl/layers";
+import { PathLayer, ScatterplotLayer, TextLayer } from "@deck.gl/layers";
 
 type RGB = [number, number, number];
 
@@ -18,6 +18,12 @@ const REGION_COLORS: Record<string, RGB> = {
   Northwest: [201, 133, 0], // #c98500
   Unknown: [137, 135, 129], // #898781
 };
+const HIGHLIGHT_LEG: RGB = [255, 255, 255];
+const KOSH_LEG: RGB = [57, 135, 229];
+const DEP_LEG: RGB = [217, 89, 38];
+const SELECT_MARKER: RGB = [237, 161, 0]; // #eda100
+
+// ---------- data shapes ----------
 
 interface JourneyMeta {
   id: number;
@@ -53,6 +59,84 @@ interface Segment {
   t1: number;
 }
 
+interface AircraftIndexRow {
+  hex: string;
+  reg: string | null;
+  type: string | null;
+  desc: string | null;
+  mil: boolean;
+  n_legs: number;
+  first_ts: number;
+  last_ts: number;
+  time_aloft_s: number;
+  kosh_arrival_ts: number | null;
+  kosh_departure_ts: number | null;
+}
+
+interface AircraftLeg {
+  idx: number;
+  t_start: number;
+  t_end: number;
+  duration_s: number;
+  from: string | null;
+  to: string | null;
+  nm: number;
+  path: [number, number, number][]; // t_rel, lon, lat
+}
+
+interface AircraftDetail {
+  hex: string;
+  reg: string | null;
+  type: string | null;
+  desc: string | null;
+  mil: boolean;
+  legs: AircraftLeg[];
+}
+
+interface AirportIndexRow {
+  ident: string;
+  name: string | null;
+  city: string | null;
+  iso_region: string | null;
+  lat: number | null;
+  lon: number | null;
+  arrivals: number;
+  departures: number;
+}
+
+interface AirportTouch {
+  hex: string;
+  reg: string | null;
+  type: string | null;
+  desc: string | null;
+  dir: "arrival" | "departure";
+  other: string | null;
+  t_start: number;
+  t_end: number;
+}
+
+interface AirportDetail extends AirportIndexRow {
+  touches: AirportTouch[];
+}
+
+interface Stats {
+  totals: { aircraft: number; inbound: number; outbound: number };
+  daily: { day: string; inbound: number; outbound: number }[];
+  regions: { region: string; inbound: number; outbound: number }[];
+  top_origins: { ident: string; name: string | null; city: string | null; n: number }[];
+  top_dests: { ident: string; name: string | null; city: string | null; n: number }[];
+  top_types: { label: string; n: number }[];
+}
+
+// ---------- selection state ----------
+
+type Selection =
+  | { kind: "aircraft"; hex: string; detail: AircraftDetail }
+  | { kind: "airport"; ident: string; detail: AirportDetail }
+  | { kind: "type"; label: string; matches: JourneyMeta[] };
+
+// ---------- helpers ----------
+
 async function loadData() {
   const [manifest, bin] = await Promise.all([
     fetch("data/manifest.json").then((r) => r.json() as Promise<Manifest>),
@@ -86,6 +170,29 @@ function fmtClock(epochS: number): string {
   });
 }
 
+function fmtDateShort(epochS: number): string {
+  return new Date(epochS * 1000).toLocaleString("en-US", {
+    timeZone: "America/Chicago",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function fmtDuration(seconds: number): string {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.round((seconds % 3600) / 60);
+  if (h === 0) return `${m}m`;
+  return `${h}h ${m}m`;
+}
+
+function escapeHtml(s: string): string {
+  const div = document.createElement("div");
+  div.textContent = s;
+  return div.innerHTML;
+}
+
 type ColorMode = "dir" | "region";
 
 function colorFor(meta: JourneyMeta, mode: ColorMode): RGB {
@@ -117,27 +224,17 @@ function renderLegend(mode: ColorMode) {
     .join("");
 }
 
-interface Stats {
-  totals: { aircraft: number; inbound: number; outbound: number };
-  daily: { day: string; inbound: number; outbound: number }[];
-  regions: { region: string; inbound: number; outbound: number }[];
-  top_origins: { ident: string; name: string | null; city: string | null; n: number }[];
-  top_dests: { ident: string; name: string | null; city: string | null; n: number }[];
-  top_types: { label: string; n: number }[];
-}
-
 function barRow(label: string, value: number, max: number, color: string, sub = ""): string {
   const w = max > 0 ? Math.max(1, (value / max) * 100) : 0;
-  return `<div class="bar-row" title="${label}${sub ? " — " + sub : ""}">
-    <span class="bar-label">${label}</span>
+  return `<div class="bar-row" title="${escapeHtml(label)}${sub ? " — " + escapeHtml(sub) : ""}">
+    <span class="bar-label">${escapeHtml(label)}</span>
     <span class="bar-track"><i style="width:${w}%;background:${color}"></i></span>
     <span class="bar-val">${value.toLocaleString()}</span>
   </div>`;
 }
 
-async function renderStats() {
+async function renderOverview(body: HTMLElement) {
   const s: Stats = await fetch("data/stats.json").then((r) => r.json());
-  const body = document.getElementById("stats-body")!;
   const dayMax = Math.max(...s.daily.map((d) => Math.max(d.inbound, d.outbound)));
   const originMax = Math.max(...s.top_origins.map((o) => o.n), 1);
   const destMax = Math.max(...s.top_dests.map((o) => o.n), 1);
@@ -186,11 +283,27 @@ async function renderStats() {
   `;
 }
 
+// ---------- main ----------
+
 async function main() {
   const { manifest, segments } = await loadData();
   const T0 = 0;
   const T1 = manifest.window_end - manifest.window_start;
   const journeys = manifest.journeys;
+
+  const [aircraftIndexRaw, airportIndexRaw] = await Promise.all([
+    fetch("data/aircraft_index.json").then((r) => r.json()),
+    fetch("data/airport_index.json").then((r) => r.json()),
+  ]);
+  const aircraftIndex: AircraftIndexRow[] = aircraftIndexRaw.aircraft;
+  const airportIndex: AirportIndexRow[] = airportIndexRaw.airports;
+  const distinctTypes = Array.from(
+    new Map(
+      aircraftIndex
+        .filter((a) => a.type || a.desc)
+        .map((a) => [a.desc ?? a.type ?? "", { label: a.desc ?? a.type ?? "", type: a.type }])
+    ).values()
+  ).sort((a, b) => a.label.localeCompare(b.label));
 
   const map = new maplibregl.Map({
     container: "map",
@@ -205,8 +318,10 @@ async function main() {
 
   let current = T0;
   let playing = true;
+  let wasPlayingBeforeSelection = true;
   let speed = 1800;
   let colorMode: ColorMode = "dir";
+  let selection: Selection | null = null;
   let lastFrame = performance.now();
 
   const playBtn = document.getElementById("play") as HTMLButtonElement;
@@ -215,6 +330,10 @@ async function main() {
   const colorSel = document.getElementById("colorby") as HTMLSelectElement;
   const clock = document.getElementById("clock")!;
   const counts = document.getElementById("counts")!;
+  const explorePanel = document.getElementById("explore-panel") as HTMLElement;
+  const exploreBody = document.getElementById("explore-body")!;
+  const selectionBar = document.getElementById("selection-bar") as HTMLElement;
+  const selectionLabel = document.getElementById("selection-label")!;
   scrub.max = String(Math.floor(T1));
   renderLegend(colorMode);
 
@@ -223,6 +342,48 @@ async function main() {
     for (const s of segments) if (s.t0 <= t && t <= s.t1) n++;
     return n;
   }
+
+  function flyToBounds(points: [number, number][], padding = 60) {
+    if (points.length === 0) return;
+    let minLon = Infinity, maxLon = -Infinity, minLat = Infinity, maxLat = -Infinity;
+    for (const [lon, lat] of points) {
+      if (lon < minLon) minLon = lon;
+      if (lon > maxLon) maxLon = lon;
+      if (lat < minLat) minLat = lat;
+      if (lat > maxLat) maxLat = lat;
+    }
+    map.fitBounds(
+      [
+        [minLon, minLat],
+        [maxLon, maxLat],
+      ],
+      { padding, duration: 900, maxZoom: 9 }
+    );
+  }
+
+  // ----- selection lifecycle -----
+
+  function enterSelection(sel: Selection, label: string) {
+    if (!selection) {
+      wasPlayingBeforeSelection = playing;
+      playing = false;
+      playBtn.textContent = "▶";
+    }
+    selection = sel;
+    selectionBar.hidden = false;
+    selectionLabel.textContent = label;
+    render(current);
+  }
+
+  function clearSelection() {
+    selection = null;
+    selectionBar.hidden = true;
+    playing = wasPlayingBeforeSelection;
+    playBtn.textContent = playing ? "⏸" : "▶";
+    render(current);
+  }
+
+  document.getElementById("selection-clear")!.addEventListener("click", clearSelection);
 
   const koshLayers = [
     new ScatterplotLayer({
@@ -253,8 +414,9 @@ async function main() {
   ];
 
   function makeLayers(t: number) {
-    return [
-      new TripsLayer<Segment>({
+    // No selection: normal animated timelapse (all 8040 journeys).
+    if (!selection) {
+      const breadcrumbs = new TripsLayer<Segment>({
         id: "breadcrumbs",
         data: segments,
         getPath: (d) => d.path,
@@ -266,8 +428,8 @@ async function main() {
         widthMinPixels: 1,
         opacity: 0.05,
         updateTriggers: { getColor: colorMode },
-      }),
-      new TripsLayer<Segment>({
+      });
+      const trails = new TripsLayer<Segment>({
         id: "trails",
         data: segments,
         getPath: (d) => d.path,
@@ -279,15 +441,95 @@ async function main() {
         widthMinPixels: 2,
         opacity: 0.9,
         updateTriggers: { getColor: colorMode },
-      }),
-      ...koshLayers,
-    ];
+      });
+      return [breadcrumbs, trails, ...koshLayers];
+    }
+
+    // Selection active: isolate — background layers are replaced entirely by
+    // just the matching content, at full static opacity (not time-scrubbed).
+    // (Dimming the full 8040-journey layer in place doesn't work: thousands
+    // of overlapping semi-transparent lines alpha-stack back up to looking
+    // nearly full-brightness, so we drop the background layers instead.)
+    const extraLayers: any[] = [];
+
+    if (selection.kind === "aircraft") {
+      const det = selection.detail;
+      const legPaths = det.legs.map((leg) => ({
+        leg,
+        path: leg.path.map((p) => [p[1], p[2]] as [number, number]),
+      }));
+      extraLayers.push(
+        new PathLayer({
+          id: "aircraft-path",
+          data: legPaths,
+          getPath: (d: any) => d.path,
+          getColor: (d: any) =>
+            d.leg.to === "KOSH" ? KOSH_LEG : d.leg.from === "KOSH" ? DEP_LEG : HIGHLIGHT_LEG,
+          getWidth: 3,
+          widthMinPixels: 3,
+          capRounded: true,
+          jointRounded: true,
+        }),
+        new ScatterplotLayer({
+          id: "aircraft-stops",
+          data: legPaths.flatMap((d) => [d.path[0], d.path[d.path.length - 1]]),
+          getPosition: (d: [number, number]) => d,
+          getFillColor: [255, 255, 255, 230],
+          getLineColor: [11, 11, 11, 200],
+          lineWidthMinPixels: 1.5,
+          stroked: true,
+          radiusMinPixels: 3,
+          radiusMaxPixels: 5,
+        })
+      );
+    } else {
+      const hexes = new Set(
+        selection.kind === "airport"
+          ? selection.detail.touches.map((tt) => tt.hex)
+          : selection.matches.map((m) => m.hex)
+      );
+      const matched = segments.filter((s) => hexes.has(s.meta.hex));
+      extraLayers.push(
+        new TripsLayer<Segment>({
+          id: "matched",
+          data: matched,
+          getPath: (d) => d.path,
+          getTimestamps: (d) => d.timestamps,
+          getColor: (d) => colorFor(d.meta, colorMode),
+          currentTime: T1,
+          trailLength: T1,
+          fadeTrail: false,
+          widthMinPixels: 2,
+          opacity: 0.85,
+          updateTriggers: { getColor: colorMode },
+        })
+      );
+      if (selection.kind === "airport" && selection.detail.lat != null) {
+        extraLayers.push(
+          new ScatterplotLayer({
+            id: "airport-marker",
+            data: [{ pos: [selection.detail.lon!, selection.detail.lat!] }],
+            getPosition: (d: { pos: [number, number] }) => d.pos,
+            getFillColor: SELECT_MARKER,
+            getLineColor: [11, 11, 11, 220],
+            lineWidthMinPixels: 2,
+            stroked: true,
+            radiusMinPixels: 6,
+            radiusMaxPixels: 10,
+          })
+        );
+      }
+    }
+
+    return [...extraLayers, ...koshLayers];
   }
 
   function render(t: number) {
     overlay.setProps({ layers: makeLayers(t) });
     clock.textContent = fmtClock(manifest.window_start + t) + " CDT";
-    counts.textContent = `${activeCount(t)} aircraft in motion · ${journeys.length} journeys total`;
+    counts.textContent = selection
+      ? "Inspecting selection — clear to resume the timelapse"
+      : `${activeCount(t)} aircraft in motion · ${journeys.length} journeys total`;
     scrub.value = String(Math.floor(t));
   }
 
@@ -303,6 +545,7 @@ async function main() {
   }
 
   playBtn.addEventListener("click", () => {
+    if (selection) clearSelection();
     playing = !playing;
     playBtn.textContent = playing ? "⏸" : "▶";
   });
@@ -313,6 +556,7 @@ async function main() {
     }
   });
   scrub.addEventListener("input", () => {
+    if (selection) clearSelection();
     current = Number(scrub.value);
     render(current);
   });
@@ -323,16 +567,293 @@ async function main() {
     render(current);
   });
 
-  const statsPanel = document.getElementById("stats-panel") as HTMLElement;
-  let statsLoaded = false;
-  document.getElementById("stats-toggle")!.addEventListener("click", async () => {
-    statsPanel.hidden = !statsPanel.hidden;
-    if (!statsPanel.hidden && !statsLoaded) {
-      statsLoaded = true;
-      await renderStats();
+  // ----- aircraft selection -----
+
+  async function selectAircraft(hex: string) {
+    const detail: AircraftDetail = await fetch(`data/aircraft/${hex}.json`).then((r) => r.json());
+    const label = `${detail.reg ?? hex} — ${detail.desc ?? detail.type ?? "unknown type"}`;
+    enterSelection({ kind: "aircraft", hex, detail }, label);
+    const allPts = detail.legs.flatMap((l) => l.path.map((p) => [p[1], p[2]] as [number, number]));
+    flyToBounds(allPts);
+    renderAircraftTab(document.getElementById("tab-aircraft")!, detail);
+  }
+
+  async function selectAirport(ident: string) {
+    const detail: AirportDetail = await fetch(`data/airports/${ident}.json`).then((r) => r.json());
+    const label = `${detail.ident}${detail.name ? " — " + detail.name : ""}`;
+    enterSelection({ kind: "airport", ident, detail }, label);
+    const hexes = new Set(detail.touches.map((t) => t.hex));
+    const pts = segments.filter((s) => hexes.has(s.meta.hex)).flatMap((s) => s.path);
+    if (detail.lat != null && detail.lon != null) pts.push([detail.lon, detail.lat]);
+    flyToBounds(pts);
+    renderAirportTab(document.getElementById("tab-airport")!, detail);
+  }
+
+  function selectType(label: string) {
+    const matches = journeys.filter((j) => (j.desc ?? j.type ?? "") === label);
+    enterSelection({ kind: "type", label, matches }, `${label} (${matches.length} journeys)`);
+    const hexes = new Set(matches.map((m) => m.hex));
+    const pts = segments.filter((s) => hexes.has(s.meta.hex)).flatMap((s) => s.path);
+    flyToBounds(pts);
+    renderTypeTab(document.getElementById("tab-type")!, label, matches);
+  }
+
+  // ----- tab renderers -----
+
+  function renderAircraftTab(container: HTMLElement, preselected?: AircraftDetail) {
+    if (preselected) {
+      const d = preselected;
+      const legs = d.legs;
+      const first = legs[0], last = legs[legs.length - 1];
+      const timeAloft = legs.reduce((sum, l) => sum + l.duration_s, 0);
+      container.innerHTML = `
+        <div class="detail-card">
+          <div class="detail-title">${escapeHtml(d.reg ?? d.hex)}${d.mil ? " ✈ MIL" : ""}</div>
+          <div class="detail-sub">${escapeHtml(d.desc ?? d.type ?? "unknown type")} · hex ${d.hex}</div>
+          <div class="detail-tiles">
+            <div class="tile"><div class="tile-num">${legs.length}</div><div class="tile-cap">flight legs</div></div>
+            <div class="tile"><div class="tile-num">${fmtDuration(timeAloft)}</div><div class="tile-cap">time aloft</div></div>
+          </div>
+          <div class="detail-sub">First seen ${fmtDateShort(first.t_start)} · Last seen ${fmtDateShort(last.t_end)}</div>
+          <h3>Flight legs</h3>
+          <div>${legs
+            .map(
+              (l) => `
+            <div class="leg-row">
+              <span class="leg-date">${fmtDateShort(l.t_start)}</span>
+              <span class="leg-route"><span class="apt">${l.from ?? "?"}</span> → <span class="apt">${l.to ?? "?"}</span></span>
+              <span class="leg-dur">${fmtDuration(l.duration_s)}${l.nm ? " · " + Math.round(l.nm) + " nm" : ""}</span>
+            </div>`
+            )
+            .join("")}</div>
+        </div>
+      `;
+      return;
+    }
+    container.innerHTML = `
+      <input class="search-box" id="aircraft-search" placeholder="N-number or hex (e.g. N123AB, a1e9ed)" />
+      <div class="search-hint">${aircraftIndex.length.toLocaleString()} aircraft indexed</div>
+      <div class="result-list" id="aircraft-results"></div>
+    `;
+    const input = document.getElementById("aircraft-search") as HTMLInputElement;
+    const results = document.getElementById("aircraft-results")!;
+    input.addEventListener("input", () => {
+      const q = input.value.trim().toLowerCase();
+      if (q.length < 2) {
+        results.innerHTML = "";
+        return;
+      }
+      const matches = aircraftIndex
+        .filter((a) => (a.reg && a.reg.toLowerCase().includes(q)) || a.hex.toLowerCase().includes(q))
+        .slice(0, 40);
+      results.innerHTML = matches.length
+        ? matches
+            .map(
+              (a) => `
+          <div class="result-row" data-hex="${a.hex}">
+            <div>
+              <div class="result-main">${escapeHtml(a.reg ?? a.hex)}</div>
+              <div class="result-sub">${escapeHtml(a.desc ?? a.type ?? "unknown")} · ${a.n_legs} legs</div>
+            </div>
+          </div>`
+            )
+            .join("")
+        : `<div class="no-results">No matches</div>`;
+      results.querySelectorAll<HTMLElement>(".result-row").forEach((row) => {
+        row.addEventListener("click", () => selectAircraft(row.dataset.hex!));
+      });
+    });
+    input.focus();
+  }
+
+  function renderAirportTab(container: HTMLElement, preselected?: AirportDetail) {
+    if (preselected) {
+      const d = preselected;
+      container.innerHTML = `
+        <div class="detail-card">
+          <div class="detail-title">${escapeHtml(d.ident)}</div>
+          <div class="detail-sub">${escapeHtml(d.name ?? "")}${d.city ? " · " + escapeHtml(d.city) : ""}</div>
+          <div class="detail-tiles">
+            <div class="tile"><div class="tile-num">${d.arrivals}</div><div class="tile-cap">arrivals</div></div>
+            <div class="tile"><div class="tile-num">${d.departures}</div><div class="tile-cap">departures</div></div>
+          </div>
+          <h3>Aircraft (${d.touches.length})</h3>
+          <div class="result-list" id="airport-aircraft-list">${d.touches
+            .map(
+              (t) => `
+            <div class="result-row" data-hex="${t.hex}">
+              <div>
+                <div class="result-main">${escapeHtml(t.reg ?? t.hex)}</div>
+                <div class="result-sub">${escapeHtml(t.desc ?? t.type ?? "unknown")} · ${t.dir === "arrival" ? "from " + (t.other ?? "?") : "to " + (t.other ?? "?")} · ${fmtDateShort(t.dir === "arrival" ? t.t_end : t.t_start)}</div>
+              </div>
+              <span class="result-badge ${t.dir}">${t.dir === "arrival" ? "ARR" : "DEP"}</span>
+            </div>`
+            )
+            .join("")}</div>
+        </div>
+      `;
+      container.querySelectorAll<HTMLElement>("#airport-aircraft-list .result-row").forEach((row) => {
+        row.addEventListener("click", () => selectAircraft(row.dataset.hex!));
+      });
+      return;
+    }
+    container.innerHTML = `
+      <input class="search-box" id="airport-search" placeholder="ICAO ident or airport name (e.g. KATW, Appleton)" />
+      <div class="search-hint">${airportIndex.length.toLocaleString()} airports indexed</div>
+      <div class="result-list" id="airport-results"></div>
+    `;
+    const input = document.getElementById("airport-search") as HTMLInputElement;
+    const results = document.getElementById("airport-results")!;
+    input.addEventListener("input", () => {
+      const q = input.value.trim().toLowerCase();
+      if (q.length < 2) {
+        results.innerHTML = "";
+        return;
+      }
+      const matches = airportIndex
+        .filter(
+          (a) =>
+            a.ident.toLowerCase().includes(q) ||
+            (a.name && a.name.toLowerCase().includes(q)) ||
+            (a.city && a.city.toLowerCase().includes(q))
+        )
+        .slice(0, 40);
+      results.innerHTML = matches.length
+        ? matches
+            .map(
+              (a) => `
+          <div class="result-row" data-ident="${a.ident}">
+            <div>
+              <div class="result-main">${escapeHtml(a.ident)}</div>
+              <div class="result-sub">${escapeHtml(a.name ?? "")}${a.city ? " · " + escapeHtml(a.city) : ""}</div>
+            </div>
+            <span class="result-badge">${a.arrivals + a.departures}</span>
+          </div>`
+            )
+            .join("")
+        : `<div class="no-results">No matches</div>`;
+      results.querySelectorAll<HTMLElement>(".result-row").forEach((row) => {
+        row.addEventListener("click", () => selectAirport(row.dataset.ident!));
+      });
+    });
+    input.focus();
+  }
+
+  function renderTypeTab(container: HTMLElement, label?: string, matches?: JourneyMeta[]) {
+    if (label && matches) {
+      const uniqueHexes = new Set(matches.map((m) => m.hex));
+      container.innerHTML = `
+        <div class="detail-card">
+          <div class="detail-title">${escapeHtml(label)}</div>
+          <div class="detail-sub">${uniqueHexes.size} aircraft · ${matches.length} journeys shown</div>
+          <h3>Aircraft</h3>
+          <div class="result-list" id="type-aircraft-list">${matches
+            .map(
+              (m) => `
+            <div class="result-row" data-hex="${m.hex}">
+              <div>
+                <div class="result-main">${escapeHtml(m.reg ?? m.hex)}</div>
+                <div class="result-sub">${m.dir === "inbound" ? "from " + (m.origin ?? "?") : "to " + (m.dest ?? "?")} · ${m.region}</div>
+              </div>
+              <span class="result-badge ${m.dir === "inbound" ? "arrival" : "departure"}">${m.dir === "inbound" ? "ARR" : "DEP"}</span>
+            </div>`
+            )
+            .join("")}</div>
+        </div>
+      `;
+      container.querySelectorAll<HTMLElement>("#type-aircraft-list .result-row").forEach((row) => {
+        row.addEventListener("click", () => selectAircraft(row.dataset.hex!));
+      });
+      return;
+    }
+    container.innerHTML = `
+      <input class="search-box" id="type-search" placeholder="Aircraft type (e.g. RV10, Cessna 172)" />
+      <div class="search-hint">${distinctTypes.length.toLocaleString()} distinct types</div>
+      <div class="result-list" id="type-results"></div>
+    `;
+    const input = document.getElementById("type-search") as HTMLInputElement;
+    const results = document.getElementById("type-results")!;
+    const journeyCountByLabel = new Map<string, number>();
+    for (const j of journeys) {
+      const l = j.desc ?? j.type ?? "";
+      if (l) journeyCountByLabel.set(l, (journeyCountByLabel.get(l) ?? 0) + 1);
+    }
+    input.addEventListener("input", () => {
+      const q = input.value.trim().toLowerCase();
+      if (q.length < 2) {
+        results.innerHTML = "";
+        return;
+      }
+      const matched = distinctTypes.filter((t) => t.label.toLowerCase().includes(q)).slice(0, 40);
+      results.innerHTML = matched.length
+        ? matched
+            .map(
+              (t) => `
+          <div class="result-row" data-label="${escapeHtml(t.label)}">
+            <div class="result-main">${escapeHtml(t.label)}</div>
+            <span class="result-badge">${journeyCountByLabel.get(t.label) ?? 0}</span>
+          </div>`
+            )
+            .join("")
+        : `<div class="no-results">No matches</div>`;
+      results.querySelectorAll<HTMLElement>(".result-row").forEach((row) => {
+        row.addEventListener("click", () => selectType(row.dataset.label!));
+      });
+    });
+    input.focus();
+  }
+
+  // ----- explore panel: tabs -----
+
+  const tabIds = ["overview", "aircraft", "airport", "type"] as const;
+  type TabId = (typeof tabIds)[number];
+  let activeTab: TabId = "overview";
+  const loadedTabs = new Set<TabId>();
+
+  function tabContainer(id: TabId): HTMLElement {
+    let el = document.getElementById(`tab-${id}`);
+    if (!el) {
+      el = document.createElement("div");
+      el.id = `tab-${id}`;
+      exploreBody.appendChild(el);
+    }
+    return el;
+  }
+
+  async function showTab(id: TabId) {
+    activeTab = id;
+    document.querySelectorAll<HTMLElement>(".tab-btn").forEach((b) => {
+      b.classList.toggle("active", b.dataset.tab === id);
+    });
+    for (const t of tabIds) {
+      const el = document.getElementById(`tab-${t}`);
+      if (el) el.style.display = t === id ? "" : "none";
+    }
+    const el = tabContainer(id);
+    if (!loadedTabs.has(id)) {
+      loadedTabs.add(id);
+      if (id === "overview") await renderOverview(el);
+      else if (id === "aircraft") renderAircraftTab(el);
+      else if (id === "airport") renderAirportTab(el);
+      else if (id === "type") renderTypeTab(el);
+    }
+  }
+
+  document.querySelectorAll<HTMLElement>(".tab-btn").forEach((btn) => {
+    btn.addEventListener("click", () => showTab(btn.dataset.tab as TabId));
+  });
+
+  const explorePanelEl = explorePanel;
+  let exploreOpened = false;
+  document.getElementById("explore-toggle")!.addEventListener("click", async () => {
+    explorePanelEl.hidden = !explorePanelEl.hidden;
+    if (!explorePanelEl.hidden && !exploreOpened) {
+      exploreOpened = true;
+      exploreBody.innerHTML = "";
+      await showTab(activeTab);
     }
   });
-  document.getElementById("stats-close")!.addEventListener("click", () => (statsPanel.hidden = true));
+  document.getElementById("explore-close")!.addEventListener("click", () => (explorePanelEl.hidden = true));
 
   render(current);
   requestAnimationFrame(frame);

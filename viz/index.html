@@ -30,14 +30,23 @@
         <option value="dir" selected>Direction</option>
         <option value="region">Origin region</option>
       </select>
-      <button id="stats-toggle" title="Statistics">Stats</button>
+      <button id="explore-toggle" title="Explore">Explore</button>
     </div>
-    <aside id="stats-panel" hidden>
-      <div id="stats-head">
-        <h2>Statistics</h2>
-        <button id="stats-close" title="Close">✕</button>
+    <aside id="explore-panel" hidden>
+      <div id="explore-head">
+        <div id="explore-tabs">
+          <button class="tab-btn active" data-tab="overview">Overview</button>
+          <button class="tab-btn" data-tab="aircraft">Aircraft</button>
+          <button class="tab-btn" data-tab="airport">Airport</button>
+          <button class="tab-btn" data-tab="type">Type</button>
+        </div>
+        <button id="explore-close" title="Close">✕</button>
       </div>
-      <div id="stats-body">loading…</div>
+      <div id="selection-bar" hidden>
+        <span id="selection-label"></span>
+        <button id="selection-clear">Clear</button>
+      </div>
+      <div id="explore-body">loading…</div>
     </aside>
     <script type="module" src="./src/main.ts"></script>
   </body>
