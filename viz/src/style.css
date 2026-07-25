@@ -98,6 +98,7 @@ html, body, #map { height: 100%; width: 100%; background: var(--page); overflow:
   flex-direction: column;
   overflow: hidden;
 }
+#stats-panel[hidden] { display: none; }
 #stats-head {
   display: flex;
   align-items: center;
