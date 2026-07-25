@@ -112,10 +112,13 @@ every render call; there's no persistent layer state to mutate.
   freeze and animates just that filtered subset via the shared `timeLayers()` helper, rather than clearing
   the selection back to the full dataset.
 
-**Feature toggles** (radar, night terminator, altitude tilt, tour mode) all follow the same shape: a
-boolean state variable, a checkbox/button wired to it, and a branch in `makeLayers`/`render`. Altitude data
-only exists in the per-aircraft detail JSON (`data/aircraft/<hex>.json`), not in the main `points.bin` — the
-3D tilt view is deliberately scoped to a single selected aircraft only.
+**Feature toggles** (radar, night terminator, tour mode) all follow the same shape: a boolean state
+variable, a checkbox/button wired to it, and a branch in `makeLayers`/`render`.
+
+Note: `06_export_aircraft.py` still writes `alt_ft` as a 4th element in each per-aircraft leg point
+(`data/aircraft/<hex>.json`), added for a 3D altitude-tilt view of a selected aircraft's descent. The
+frontend view was later removed (`ed415b3`) as not worth the complexity; the field is otherwise unused
+but harmless to leave in place if that view gets revisited.
 
 **Shareable URL state**: current time/speed/color-mode/radar/night/selection encode into `location.hash`
 (`history.replaceState`, throttled during playback via `lastUrlSync`, immediate on discrete actions like
