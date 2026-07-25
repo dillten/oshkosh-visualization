@@ -2,7 +2,7 @@ import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { MapboxOverlay } from "@deck.gl/mapbox";
 import { TripsLayer } from "@deck.gl/geo-layers";
-import { ScatterplotLayer, TextLayer } from "@deck.gl/layers";
+import { PolygonLayer, ScatterplotLayer, TextLayer } from "@deck.gl/layers";
 
 type RGB = [number, number, number];
 
@@ -23,6 +23,12 @@ const KOSH_LEG: RGB = [57, 135, 229];
 const DEP_LEG: RGB = [217, 89, 38];
 const SELECT_MARKER: RGB = [237, 161, 0]; // #eda100
 
+// Altitude tilt: exaggerated so the descent reads clearly against horizontal
+// distances of hundreds of km (a true 1:1 scale would be imperceptibly flat).
+const FT_TO_M = 0.3048;
+const ALT_EXAGGERATION = 12;
+const TILT_PITCH = 55;
+
 // IEM NEXRAD CONUS composite (n0r): 5-min cadence PNG archive, CORS-open,
 // fixed bounds/size for the whole archive (EPSG:4326, 0.01 deg/px).
 const RADAR_BUCKET_S = 300;
@@ -38,6 +44,69 @@ function radarUrl(epochS: number): string {
   const y = d.getUTCFullYear(), m = pad(d.getUTCMonth() + 1), day = pad(d.getUTCDate());
   const hm = pad(d.getUTCHours()) + pad(d.getUTCMinutes());
   return `https://mesonet.agron.iastate.edu/archive/data/${y}/${m}/${day}/GIS/uscomp/n0r_${y}${m}${day}${hm}.png`;
+}
+
+// ---------- day/night terminator (low-precision solar position) ----------
+// Standard approximate solar-ephemeris formulas (accurate to a fraction of a
+// degree — plenty for a visual day/night overlay), the same approach used by
+// the well-known Leaflet.Terminator plugin.
+
+function toRad(d: number): number {
+  return (d * Math.PI) / 180;
+}
+function toDeg(r: number): number {
+  return (r * 180) / Math.PI;
+}
+function normDeg(d: number): number {
+  return ((d % 360) + 360) % 360;
+}
+
+function subsolarPoint(date: Date): { lat: number; lon: number } {
+  const n = date.getTime() / 86400000 + 2440587.5 - 2451545.0; // days since J2000.0
+  const L = normDeg(280.46 + 0.9856474 * n);
+  const g = toRad(normDeg(357.528 + 0.9856003 * n));
+  const lambda = toRad(L + 1.915 * Math.sin(g) + 0.02 * Math.sin(2 * g));
+  const eps = toRad(23.439 - 0.0000004 * n);
+  const decl = toDeg(Math.asin(Math.sin(eps) * Math.sin(lambda)));
+  const alpha = normDeg(toDeg(Math.atan2(Math.cos(eps) * Math.sin(lambda), Math.cos(lambda))));
+  const gmst = normDeg(280.46061837 + 360.98564736629 * n);
+  const lon = ((alpha - gmst + 180) % 360 + 360) % 360 - 180;
+  return { lat: decl, lon };
+}
+
+/** Ring covering the night hemisphere at the given instant, for a filled
+ * dimming overlay. Walks the terminator (day/night boundary) longitude by
+ * longitude, then closes the polygon by wrapping around whichever pole is
+ * currently in darkness. */
+function terminatorRing(date: Date): [number, number][] {
+  const { lat: decl, lon: subLon } = subsolarPoint(date);
+  const declRad = toRad(decl);
+  const pts: [number, number][] = [];
+  for (let lng = -180; lng <= 180; lng += 3) {
+    const H = toRad(((lng - subLon + 180) % 360 + 360) % 360 - 180);
+    let lat: number;
+    if (Math.abs(declRad) < 1e-6) {
+      lat = Math.cos(H) >= 0 ? -89.9 : 89.9;
+    } else {
+      lat = Math.max(-89.9, Math.min(89.9, toDeg(Math.atan(-Math.cos(H) / Math.tan(declRad)))));
+    }
+    pts.push([lng, lat]);
+  }
+  const nightPoleLat = decl >= 0 ? -90 : 90;
+  pts.push([180, nightPoleLat]);
+  pts.push([-180, nightPoleLat]);
+  return pts;
+}
+
+// ---------- misc UI helpers ----------
+
+let toastTimer: number | undefined;
+function showToast(msg: string, ms = 2200) {
+  const el = document.getElementById("toast") as HTMLElement;
+  el.textContent = msg;
+  el.hidden = false;
+  window.clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => (el.hidden = true), ms);
 }
 
 // ---------- data shapes ----------
@@ -76,9 +145,11 @@ interface Segment {
   t1: number;
 }
 
+type Position = [number, number] | [number, number, number];
+
 interface LegSegment {
   leg: AircraftLeg;
-  path: [number, number][];
+  path: Position[];
   timestamps: number[];
   t0: number;
   t1: number;
@@ -106,7 +177,7 @@ interface AircraftLeg {
   from: string | null;
   to: string | null;
   nm: number;
-  path: [number, number, number][]; // t_rel, lon, lat
+  path: [number, number, number, number][]; // t_rel, lon, lat, alt_ft
 }
 
 interface AircraftDetail {
@@ -218,6 +289,119 @@ function escapeHtml(s: string): string {
   return div.innerHTML;
 }
 
+/** Renders a standalone "postcard" PNG of one aircraft's full route (not a
+ * screenshot of the live map — a dedicated Canvas 2D drawing so the result
+ * looks the same regardless of the app's current pan/zoom) and triggers a
+ * download. */
+function downloadRouteCard(detail: AircraftDetail) {
+  const allPts = detail.legs.flatMap((l) => l.path);
+  if (allPts.length < 2) return;
+
+  const W = 1200, H = 800;
+  const canvas = document.createElement("canvas");
+  canvas.width = W;
+  canvas.height = H;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, "#14140f");
+  grad.addColorStop(1, "#0d0d0d");
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+
+  let minLon = Infinity, maxLon = -Infinity, minLat = Infinity, maxLat = -Infinity;
+  for (const p of allPts) {
+    minLon = Math.min(minLon, p[1]);
+    maxLon = Math.max(maxLon, p[1]);
+    minLat = Math.min(minLat, p[2]);
+    maxLat = Math.max(maxLat, p[2]);
+  }
+  const cosLat = Math.max(0.15, Math.cos(toRad((minLat + maxLat) / 2)));
+  const padding = 90;
+  const plotW = W - padding * 2;
+  const plotH = H - padding * 2 - 60;
+  const spanX = Math.max(1e-6, (maxLon - minLon) * cosLat);
+  const spanY = Math.max(1e-6, maxLat - minLat);
+  const scale = Math.min(plotW / spanX, plotH / spanY);
+  const offX = padding + (plotW - spanX * scale) / 2;
+  const offY = padding + 40 + (plotH - spanY * scale) / 2;
+  const project = (lon: number, lat: number): [number, number] => [
+    offX + (lon - minLon) * cosLat * scale,
+    offY + (maxLat - lat) * scale,
+  ];
+
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  for (const leg of detail.legs) {
+    if (leg.path.length < 2) continue;
+    const color = leg.to === "KOSH" ? "#3987e5" : leg.from === "KOSH" ? "#d95926" : "#ffffff";
+    ctx.strokeStyle = color;
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 8;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    leg.path.forEach((p, i) => {
+      const [x, y] = project(p[1], p[2]);
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
+  ctx.shadowBlur = 0;
+
+  const firstLeg = detail.legs[0];
+  const lastLeg = detail.legs[detail.legs.length - 1];
+  const endpoints: [[number, number, number, number], string | null][] = [
+    [firstLeg.path[0], firstLeg.from],
+    [lastLeg.path[lastLeg.path.length - 1], lastLeg.to],
+  ];
+  for (const [p, label] of endpoints) {
+    const [x, y] = project(p[1], p[2]);
+    ctx.beginPath();
+    ctx.arc(x, y, 5, 0, Math.PI * 2);
+    ctx.fillStyle = "#ffffff";
+    ctx.fill();
+    if (label) {
+      ctx.font = "600 13px system-ui, sans-serif";
+      ctx.fillStyle = "#ffffff";
+      ctx.textAlign = "center";
+      ctx.fillText(label, x, y - 12);
+    }
+  }
+
+  ctx.textAlign = "left";
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "700 30px system-ui, sans-serif";
+  ctx.fillText(detail.reg ?? detail.hex, 40, 56);
+  ctx.font = "400 16px system-ui, sans-serif";
+  ctx.fillStyle = "#c3c2b7";
+  ctx.fillText(detail.desc ?? detail.type ?? "Unknown type", 40, 80);
+
+  const timeAloft = detail.legs.reduce((s, l) => s + l.duration_s, 0);
+  const totalNm = detail.legs.reduce((s, l) => s + (l.nm || 0), 0);
+  ctx.font = "400 14px system-ui, sans-serif";
+  ctx.fillStyle = "#898781";
+  ctx.textAlign = "left";
+  ctx.fillText(
+    `${detail.legs.length} legs · ${Math.round(totalNm).toLocaleString()} nm · ${fmtDuration(timeAloft)} aloft`,
+    40,
+    H - 34
+  );
+  ctx.textAlign = "right";
+  ctx.fillText("EAA AirVenture Oshkosh 2026", W - 40, H - 34);
+
+  canvas.toBlob((blob) => {
+    if (!blob) return;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${(detail.reg ?? detail.hex).replace(/[^a-z0-9]/gi, "_")}_route.png`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, "image/png");
+}
+
 type ColorMode = "dir" | "region";
 
 function colorFor(meta: JourneyMeta, mode: ColorMode): RGB {
@@ -243,7 +427,7 @@ interface TimeLayerStyle {
 function timeLayers<T>(
   idPrefix: string,
   data: T[],
-  getPath: (d: T) => [number, number][],
+  getPath: (d: T) => Position[],
   getTimestamps: (d: T) => number[],
   getColor: (d: T) => RGB,
   frozen: boolean,
@@ -380,11 +564,43 @@ async function renderOverview(body: HTMLElement) {
 
 // ---------- main ----------
 
+interface InitialState {
+  t?: number;
+  speed?: number;
+  color?: ColorMode;
+  radar?: boolean;
+  night?: boolean;
+  sel?: { kind: "aircraft" | "airport" | "type"; value: string };
+}
+
+function parseInitialState(): InitialState {
+  const params = new URLSearchParams(location.hash.replace(/^#/, ""));
+  const out: InitialState = {};
+  if (params.has("t")) out.t = Number(params.get("t"));
+  if (params.has("speed")) out.speed = Number(params.get("speed"));
+  const color = params.get("color");
+  if (color === "dir" || color === "region") out.color = color;
+  if (params.get("radar") === "1") out.radar = true;
+  if (params.get("night") === "1") out.night = true;
+  const sel = params.get("sel");
+  if (sel) {
+    const i = sel.indexOf(":");
+    if (i > 0) {
+      const kind = sel.slice(0, i);
+      if (kind === "aircraft" || kind === "airport" || kind === "type") {
+        out.sel = { kind, value: sel.slice(i + 1) };
+      }
+    }
+  }
+  return out;
+}
+
 async function main() {
   const { manifest, segments } = await loadData();
   const T0 = 0;
   const T1 = manifest.window_end - manifest.window_start;
   const journeys = manifest.journeys;
+  const initial = parseInitialState();
 
   const [aircraftIndexRaw, airportIndexRaw] = await Promise.all([
     fetch("data/aircraft_index.json").then((r) => r.json()),
@@ -411,11 +627,11 @@ async function main() {
   const overlay = new MapboxOverlay({ interleaved: false, layers: [] });
   map.addControl(overlay as unknown as maplibregl.IControl);
 
-  let current = T0;
+  let current = Math.min(T1, Math.max(T0, initial.t ?? T0));
   let playing = true;
   let wasPlayingBeforeSelection = true;
-  let speed = 1800;
-  let colorMode: ColorMode = "dir";
+  let speed = initial.speed ?? 1800;
+  let colorMode: ColorMode = initial.color ?? "dir";
   let selection: Selection | null = null;
   // A fresh selection starts "frozen" (full route revealed, clock paused).
   // Pressing play or dragging the slider unfreezes it so play/scrub animate
@@ -424,13 +640,13 @@ async function main() {
   let lastFrame = performance.now();
 
   // ----- radar overlay (opt-in; NEXRAD CONUS composite via IEM Mesonet) -----
-  let radarEnabled = false;
+  let radarEnabled = !!initial.radar;
   let radarReady = false;
   let lastRadarBucket = -1;
   map.on("load", () => {
     map.addSource("radar", {
       type: "image",
-      url: radarUrl(manifest.window_start),
+      url: radarUrl(manifest.window_start + current),
       coordinates: RADAR_BOUNDS,
     });
     map.addLayer({
@@ -438,7 +654,7 @@ async function main() {
       type: "raster",
       source: "radar",
       paint: { "raster-opacity": 0.55, "raster-fade-duration": 200 },
-      layout: { visibility: "none" },
+      layout: { visibility: radarEnabled ? "visible" : "none" },
     });
     radarReady = true;
   });
@@ -453,11 +669,21 @@ async function main() {
     src?.updateImage({ url: radarUrl(epoch) });
   }
 
+  // ----- day/night terminator (opt-in) -----
+  let nightEnabled = !!initial.night;
+
+  // ----- altitude tilt (opt-in, only meaningful for an aircraft selection) -----
+  let tiltEnabled = false;
+
   const playBtn = document.getElementById("play") as HTMLButtonElement;
   const scrub = document.getElementById("scrub") as HTMLInputElement;
   const speedSel = document.getElementById("speed") as HTMLSelectElement;
   const colorSel = document.getElementById("colorby") as HTMLSelectElement;
   const radarToggle = document.getElementById("radar-toggle") as HTMLInputElement;
+  const nightToggle = document.getElementById("night-toggle") as HTMLInputElement;
+  const tiltToggle = document.getElementById("tilt-toggle") as HTMLInputElement;
+  const tiltLabel = document.getElementById("tilt-label") as HTMLElement;
+  const linkBtn = document.getElementById("link-toggle") as HTMLButtonElement;
   const clock = document.getElementById("clock")!;
   const counts = document.getElementById("counts")!;
   const explorePanel = document.getElementById("explore-panel") as HTMLElement;
@@ -465,6 +691,12 @@ async function main() {
   const selectionBar = document.getElementById("selection-bar") as HTMLElement;
   const selectionLabel = document.getElementById("selection-label")!;
   scrub.max = String(Math.floor(T1));
+  scrub.value = String(Math.floor(current));
+  speedSel.value = String(speed);
+  colorSel.value = colorMode;
+  radarToggle.checked = radarEnabled;
+  document.getElementById("radar-credit")!.hidden = !radarEnabled;
+  nightToggle.checked = nightEnabled;
   renderLegend(colorMode);
 
   function activeCount(t: number): number {
@@ -493,6 +725,19 @@ async function main() {
 
   // ----- selection lifecycle -----
 
+  function setTilt(enabled: boolean) {
+    tiltEnabled = enabled;
+    tiltToggle.checked = enabled;
+    if (enabled && map.getZoom() < 7) {
+      // A pitched camera barely reads at continental zoom (a flat vector
+      // map just looks the same tilted or not) — jump to a close-in view
+      // over KOSH so the 3D descent effect is actually visible immediately.
+      map.easeTo({ pitch: TILT_PITCH, zoom: 9, center: manifest.kosh, duration: 900 });
+    } else {
+      map.easeTo({ pitch: enabled ? TILT_PITCH : 0, duration: 600 });
+    }
+  }
+
   function enterSelection(sel: Selection, label: string) {
     if (!selection) {
       wasPlayingBeforeSelection = playing;
@@ -503,7 +748,10 @@ async function main() {
     selectionFrozen = true;
     selectionBar.hidden = false;
     selectionLabel.textContent = label;
+    tiltLabel.hidden = sel.kind !== "aircraft";
+    if (sel.kind !== "aircraft" && tiltEnabled) setTilt(false);
     render(current);
+    updateUrl();
   }
 
   function selectionMatchHexes(): Set<string> | null {
@@ -539,9 +787,12 @@ async function main() {
     selection = null;
     selectionFrozen = true;
     selectionBar.hidden = true;
+    tiltLabel.hidden = true;
+    if (tiltEnabled) setTilt(false);
     playing = wasPlayingBeforeSelection;
     playBtn.textContent = playing ? "⏸" : "▶";
     render(current);
+    updateUrl();
   }
 
   document.getElementById("selection-clear")!.addEventListener("click", clearSelection);
@@ -574,6 +825,22 @@ async function main() {
     }),
   ];
 
+  function terminatorLayers(t: number): any[] {
+    if (!nightEnabled) return [];
+    const date = new Date((manifest.window_start + t) * 1000);
+    const ring = terminatorRing(date);
+    return [
+      new PolygonLayer({
+        id: "terminator",
+        data: [{ ring }],
+        getPolygon: (d: { ring: [number, number][] }) => d.ring,
+        getFillColor: [0, 0, 8, 165],
+        stroked: false,
+        pickable: false,
+      }),
+    ];
+  }
+
   function makeLayers(t: number) {
     // No selection: normal animated timelapse (all 8040 journeys).
     if (!selection) {
@@ -603,7 +870,7 @@ async function main() {
         opacity: 0.9,
         updateTriggers: { getColor: colorMode },
       });
-      return [breadcrumbs, trails, ...koshLayers];
+      return [...terminatorLayers(t), breadcrumbs, trails, ...koshLayers];
     }
 
     // Selection active: isolate — background layers are replaced entirely by
@@ -618,7 +885,9 @@ async function main() {
     if (selection.kind === "aircraft") {
       const det = selection.detail;
       const legSegments: LegSegment[] = det.legs.map((leg) => {
-        const path = leg.path.map((p) => [p[1], p[2]] as [number, number]);
+        const path: Position[] = leg.path.map((p) =>
+          tiltEnabled ? [p[1], p[2], Math.max(0, p[3]) * FT_TO_M * ALT_EXAGGERATION] : [p[1], p[2]]
+        );
         const timestamps = leg.path.map((p) => p[0]);
         return { leg, path, timestamps, t0: timestamps[0], t1: timestamps[timestamps.length - 1] };
       });
@@ -637,7 +906,7 @@ async function main() {
         new ScatterplotLayer({
           id: "aircraft-stops",
           data: legSegments.flatMap((d) => [d.path[0], d.path[d.path.length - 1]]),
-          getPosition: (d: [number, number]) => d,
+          getPosition: (d: Position) => d,
           getFillColor: [255, 255, 255, 230],
           getLineColor: [11, 11, 11, 200],
           lineWidthMinPixels: 1.5,
@@ -683,13 +952,46 @@ async function main() {
       }
     }
 
-    return [...extraLayers, ...koshLayers];
+    return [...terminatorLayers(t), ...extraLayers, ...koshLayers];
   }
 
   function setRadarVisible(visible: boolean) {
     if (!radarReady) return;
     map.setLayoutProperty("radar-layer", "visibility", visible ? "visible" : "none");
   }
+
+  // ----- shareable URL state -----
+
+  function encodeState(): string {
+    const params = new URLSearchParams();
+    params.set("t", String(Math.round(current)));
+    params.set("speed", String(speed));
+    params.set("color", colorMode);
+    if (radarEnabled) params.set("radar", "1");
+    if (nightEnabled) params.set("night", "1");
+    if (selection) {
+      if (selection.kind === "aircraft") params.set("sel", `aircraft:${selection.hex}`);
+      else if (selection.kind === "airport") params.set("sel", `airport:${selection.ident}`);
+      else params.set("sel", `type:${selection.label}`);
+    }
+    return params.toString();
+  }
+
+  let lastUrlSync = 0;
+  function updateUrl() {
+    lastUrlSync = performance.now();
+    history.replaceState(null, "", "#" + encodeState());
+  }
+
+  linkBtn.addEventListener("click", async () => {
+    updateUrl();
+    try {
+      await navigator.clipboard.writeText(location.href);
+      showToast("Link copied — this view will restore exactly as-is");
+    } catch {
+      showToast("Couldn't copy automatically — the address bar has the link");
+    }
+  });
 
   function render(t: number) {
     overlay.setProps({ layers: makeLayers(t) });
@@ -704,12 +1006,23 @@ async function main() {
       counts.textContent = `${activeCount(t)} aircraft in motion · ${journeys.length} journeys total`;
     }
     scrub.value = String(Math.floor(t));
+    if (performance.now() - lastUrlSync > 3000) updateUrl();
   }
 
   radarToggle.addEventListener("change", () => {
     radarEnabled = radarToggle.checked;
     document.getElementById("radar-credit")!.hidden = !radarEnabled;
     if (radarEnabled) lastRadarBucket = -1; // force a fetch for the current bucket
+    render(current);
+    updateUrl();
+  });
+  nightToggle.addEventListener("change", () => {
+    nightEnabled = nightToggle.checked;
+    render(current);
+    updateUrl();
+  });
+  tiltToggle.addEventListener("change", () => {
+    setTilt(tiltToggle.checked);
     render(current);
   });
 
@@ -726,6 +1039,7 @@ async function main() {
 
   playBtn.addEventListener("click", () => {
     if (selection) selectionFrozen = false;
+    if (tourActive) stopTourUI();
     playing = !playing;
     playBtn.textContent = playing ? "⏸" : "▶";
   });
@@ -737,19 +1051,25 @@ async function main() {
   });
   scrub.addEventListener("input", () => {
     if (selection) selectionFrozen = false;
+    if (tourActive) stopTourUI();
     current = Number(scrub.value);
     render(current);
   });
-  speedSel.addEventListener("change", () => (speed = Number(speedSel.value)));
+  speedSel.addEventListener("change", () => {
+    speed = Number(speedSel.value);
+    updateUrl();
+  });
   colorSel.addEventListener("change", () => {
     colorMode = colorSel.value as ColorMode;
     renderLegend(colorMode);
     render(current);
+    updateUrl();
   });
 
   // ----- aircraft selection -----
 
-  async function selectAircraft(hex: string) {
+  async function selectAircraft(hex: string, fromTour = false) {
+    if (tourActive && !fromTour) stopTourUI();
     const detail: AircraftDetail = await fetch(`data/aircraft/${hex}.json`).then((r) => r.json());
     const label = `${detail.reg ?? hex} — ${detail.desc ?? detail.type ?? "unknown type"}`;
     enterSelection({ kind: "aircraft", hex, detail }, label);
@@ -759,6 +1079,7 @@ async function main() {
   }
 
   async function selectAirport(ident: string) {
+    if (tourActive) stopTourUI();
     const detail: AirportDetail = await fetch(`data/airports/${ident}.json`).then((r) => r.json());
     const label = `${detail.ident}${detail.name ? " — " + detail.name : ""}`;
     enterSelection({ kind: "airport", ident, detail }, label);
@@ -770,6 +1091,7 @@ async function main() {
   }
 
   function selectType(label: string) {
+    if (tourActive) stopTourUI();
     const matches = journeys.filter((j) => (j.desc ?? j.type ?? "") === label);
     enterSelection({ kind: "type", label, matches }, `${label} (${matches.length} journeys)`);
     const hexes = new Set(matches.map((m) => m.hex));
@@ -777,6 +1099,134 @@ async function main() {
     flyToBounds(pts);
     renderTypeTab(document.getElementById("tab-type")!, label, matches);
   }
+
+  // ----- guided tour of notable aircraft -----
+
+  interface TourStop {
+    hex: string;
+    title: string;
+    caption: string;
+  }
+
+  function buildTourStops(): TourStop[] {
+    const byHex = new Map<string, JourneyMeta>();
+    for (const j of journeys) {
+      const cur = byHex.get(j.hex);
+      if (!cur || j.nm > cur.nm) byHex.set(j.hex, j);
+    }
+    const all = Array.from(byHex.values());
+    const used = new Set<string>();
+    const stops: TourStop[] = [];
+
+    function add(j: JourneyMeta, caption: string) {
+      if (used.has(j.hex)) return;
+      used.add(j.hex);
+      stops.push({
+        hex: j.hex,
+        title: `${j.reg ?? j.hex} — ${j.desc ?? j.type ?? "Unknown type"}`,
+        caption,
+      });
+    }
+
+    // Sanity cap: a handful of journeys carry a wildly implausible nm figure
+    // from a single bad GPS/decode point (a real one is fixed at the source
+    // in the pipeline, but this stays as a defensive filter regardless).
+    const byDistance = [...all]
+      .filter((j) => j.nm < 6000)
+      .sort((a, b) => b.nm - a.nm)
+      .slice(0, 4);
+    for (const j of byDistance) {
+      add(
+        j,
+        `Flew ${Math.round(j.nm).toLocaleString()} nm ${j.dir === "inbound" ? "to reach" : "on the way home from"} Oshkosh — one of the longest trips in the fleet.`
+      );
+    }
+
+    const military = all.filter((j) => j.mil).slice(0, 3);
+    for (const j of military) add(j, "A military aircraft among this week's traffic.");
+
+    const intl = all.filter((j) => j.reg && !/^N/i.test(j.reg)).slice(0, 4);
+    for (const j of intl) add(j, `An international arrival, registered outside the US.`);
+
+    const typeCounts = new Map<string, number>();
+    for (const j of all) {
+      const l = j.desc ?? j.type ?? "";
+      if (l) typeCounts.set(l, (typeCounts.get(l) ?? 0) + 1);
+    }
+    const rare = all.filter((j) => typeCounts.get(j.desc ?? j.type ?? "") === 1).slice(0, 3);
+    for (const j of rare) add(j, `The only ${j.desc ?? j.type} at the show this week.`);
+
+    return stops;
+  }
+
+  let tourStops: TourStop[] = [];
+  let tourIndex = 0;
+  let tourActive = false;
+  let tourTimer: number | undefined;
+  const TOUR_DWELL_MS = 8000;
+
+  const tourCard = document.getElementById("tour-card") as HTMLElement;
+  const tourProgress = document.getElementById("tour-progress")!;
+  const tourTitle = document.getElementById("tour-title")!;
+  const tourCaption = document.getElementById("tour-caption")!;
+  const tourToggleBtn = document.getElementById("tour-toggle") as HTMLButtonElement;
+
+  async function showTourStop(i: number) {
+    const stop = tourStops[i];
+    tourProgress.textContent = `${i + 1} / ${tourStops.length}`;
+    tourTitle.textContent = stop.title;
+    tourCaption.textContent = stop.caption;
+    await selectAircraft(stop.hex, true);
+  }
+
+  function scheduleTourAdvance() {
+    window.clearTimeout(tourTimer);
+    tourTimer = window.setTimeout(() => void tourNext(), TOUR_DWELL_MS);
+  }
+
+  async function tourNext() {
+    tourIndex = (tourIndex + 1) % tourStops.length;
+    await showTourStop(tourIndex);
+    scheduleTourAdvance();
+  }
+
+  async function tourPrev() {
+    tourIndex = (tourIndex - 1 + tourStops.length) % tourStops.length;
+    await showTourStop(tourIndex);
+    scheduleTourAdvance();
+  }
+
+  function stopTourUI() {
+    tourActive = false;
+    window.clearTimeout(tourTimer);
+    tourCard.hidden = true;
+    tourToggleBtn.classList.remove("active");
+  }
+
+  function stopTour() {
+    stopTourUI();
+    clearSelection();
+  }
+
+  async function startTour() {
+    tourStops = buildTourStops();
+    if (tourStops.length === 0) return;
+    if (explorePanel.hidden === false) explorePanel.hidden = true;
+    tourActive = true;
+    tourIndex = 0;
+    tourCard.hidden = false;
+    tourToggleBtn.classList.add("active");
+    await showTourStop(0);
+    scheduleTourAdvance();
+  }
+
+  tourToggleBtn.addEventListener("click", () => {
+    if (tourActive) stopTour();
+    else void startTour();
+  });
+  document.getElementById("tour-stop")!.addEventListener("click", stopTour);
+  document.getElementById("tour-next")!.addEventListener("click", () => void tourNext());
+  document.getElementById("tour-prev")!.addEventListener("click", () => void tourPrev());
 
   // ----- tab renderers -----
 
@@ -795,6 +1245,7 @@ async function main() {
             <div class="tile"><div class="tile-num">${fmtDuration(timeAloft)}</div><div class="tile-cap">time aloft</div></div>
           </div>
           <div class="detail-sub">First seen ${fmtDateShort(first.t_start)} · Last seen ${fmtDateShort(last.t_end)}</div>
+          <button class="route-card-btn" id="route-card-btn">Download route card</button>
           <h3>Flight legs</h3>
           <div>${legs
             .map(
@@ -808,6 +1259,7 @@ async function main() {
             .join("")}</div>
         </div>
       `;
+      document.getElementById("route-card-btn")!.addEventListener("click", () => downloadRouteCard(d));
       return;
     }
     container.innerHTML = `
@@ -1034,6 +1486,16 @@ async function main() {
     }
   });
   document.getElementById("explore-close")!.addEventListener("click", () => (explorePanelEl.hidden = true));
+
+  if (initial.sel) {
+    explorePanelEl.hidden = false;
+    exploreOpened = true;
+    exploreBody.innerHTML = "";
+    await showTab(initial.sel.kind);
+    if (initial.sel.kind === "aircraft") await selectAircraft(initial.sel.value);
+    else if (initial.sel.kind === "airport") await selectAirport(initial.sel.value);
+    else selectType(initial.sel.value);
+  }
 
   render(current);
   requestAnimationFrame(frame);

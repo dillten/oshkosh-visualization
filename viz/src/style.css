@@ -50,9 +50,10 @@ html, body, #map { height: 100%; width: 100%; background: var(--page); overflow:
   z-index: 10;
   isolation: isolate;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
-  width: min(720px, calc(100% - 40px));
+  gap: 10px;
+  width: min(920px, calc(100% - 40px));
   background: color-mix(in srgb, var(--surface-1) 97%, transparent);
   backdrop-filter: blur(6px);
   border: 1px solid var(--border);
@@ -70,7 +71,7 @@ html, body, #map { height: 100%; width: 100%; background: var(--page); overflow:
   cursor: pointer;
 }
 #play:hover { background: rgba(255, 255, 255, 0.08); }
-#scrub { flex: 1; accent-color: var(--inbound); }
+#scrub { flex: 1 1 160px; min-width: 100px; accent-color: var(--inbound); }
 #speed, #colorby {
   background: var(--surface-1);
   color: var(--text-secondary);
@@ -88,8 +89,17 @@ html, body, #map { height: 100%; width: 100%; background: var(--page); overflow:
   white-space: nowrap;
   cursor: pointer;
 }
-#radar-label input { accent-color: var(--inbound); cursor: pointer; }
-#explore-toggle {
+#radar-label input, #night-label input { accent-color: var(--inbound); cursor: pointer; }
+#night-label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  cursor: pointer;
+}
+#explore-toggle, #tour-toggle, #link-toggle {
   background: none;
   color: var(--text-secondary);
   border: 1px solid var(--border);
@@ -97,8 +107,83 @@ html, body, #map { height: 100%; width: 100%; background: var(--page); overflow:
   padding: 5px 10px;
   font-size: 12px;
   cursor: pointer;
+  white-space: nowrap;
 }
-#explore-toggle:hover { background: rgba(255, 255, 255, 0.08); }
+#explore-toggle:hover, #tour-toggle:hover, #link-toggle:hover { background: rgba(255, 255, 255, 0.08); }
+#tour-toggle.active { color: var(--text-primary); border-color: var(--inbound); background: rgba(57, 135, 229, 0.15); }
+
+#tour-card {
+  position: absolute;
+  bottom: 92px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10;
+  isolation: isolate;
+  width: min(520px, calc(100% - 32px));
+  background: color-mix(in srgb, var(--surface-1) 97%, transparent);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 16px;
+  color: var(--text-primary);
+  text-align: center;
+}
+#tour-card[hidden] { display: none; }
+#tour-progress { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+#tour-title { font-size: 15px; font-weight: 700; margin-top: 3px; }
+#tour-caption { font-size: 12px; color: var(--text-secondary); margin-top: 4px; }
+#tour-buttons { display: flex; align-items: center; justify-content: center; gap: 10px; margin-top: 10px; }
+#tour-buttons button {
+  background: none;
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+#tour-buttons button:hover { background: rgba(255, 255, 255, 0.08); }
+#tour-prev, #tour-next { padding: 5px 10px; font-size: 15px; }
+
+#tilt-label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+#tilt-label[hidden] { display: none; }
+#tilt-label input { accent-color: var(--inbound); cursor: pointer; }
+
+#toast {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 20;
+  background: color-mix(in srgb, var(--surface-1) 97%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 16px;
+  font-size: 12px;
+  color: var(--text-primary);
+  pointer-events: none;
+}
+#toast[hidden] { display: none; }
+
+.route-card-btn {
+  background: none;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 11px;
+  cursor: pointer;
+  margin-top: 8px;
+}
+.route-card-btn:hover { background: rgba(255, 255, 255, 0.08); }
 
 #explore-panel {
   position: absolute;
