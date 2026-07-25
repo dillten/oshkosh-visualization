@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AirVenture 2026 — ADS-B Timelapse</title>
+    <link rel="stylesheet" href="./src/style.css" />
+  </head>
+  <body>
+    <div id="map"></div>
+    <div id="hud">
+      <div id="title-block">
+        <h1>EAA AirVenture Oshkosh 2026</h1>
+        <div id="clock">—</div>
+        <div id="counts">loading…</div>
+      </div>
+      <div id="legend">
+        <span class="key"><i class="swatch inbound"></i>Inbound to KOSH</span>
+        <span class="key"><i class="swatch outbound"></i>Outbound from KOSH</span>
+      </div>
+    </div>
+    <div id="controls">
+      <button id="play" title="Play/pause (space)">⏸</button>
+      <input id="scrub" type="range" min="0" max="1000" value="0" step="1" />
+      <select id="speed">
+        <option value="300">300×</option>
+        <option value="900">900×</option>
+        <option value="1800" selected>1800×</option>
+        <option value="3600">3600×</option>
+        <option value="7200">7200×</option>
+      </select>
+    </div>
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>
