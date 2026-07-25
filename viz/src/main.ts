@@ -116,7 +116,6 @@ async function main() {
         fadeTrail: false,
         widthMinPixels: 1,
         opacity: 0.05,
-        parameters: { depthTest: false },
       }),
       // bright fading trails behind currently-moving aircraft
       new TripsLayer<Journey>({
@@ -130,7 +129,6 @@ async function main() {
         fadeTrail: true,
         widthMinPixels: 2,
         opacity: 0.9,
-        parameters: { depthTest: false },
       }),
     ];
   }
