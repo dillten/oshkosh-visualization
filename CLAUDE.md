@@ -26,16 +26,13 @@ uv run python pipeline/04_flights.py           # leg segmentation, airport snapp
 uv run python pipeline/05_export_viz.py        # main timelapse binary (manifest.json + points.bin + stats.json)
 uv run python pipeline/06_export_aircraft.py   # per-aircraft detail JSON + search index
 uv run python pipeline/07_export_airports.py   # per-airport traffic JSON + search index
-uv run python pipeline/08_add_special_aircraft.py  # one-off: manually inject a non-KOSH-anchored aircraft
 ```
 
 `02_scan_kosh.py` and `03_extract_traces.py` accept specific ISO dates as CLI args (e.g.
 `uv run python pipeline/02_scan_kosh.py 2026-07-20`); with no args they process every day found under
 `data/raw/`. Both use `ProcessPoolExecutor` — safe to re-run, each day's output is written independently.
 
-Whenever `04_flights.py` runs, it does a **full overwrite** of `flights.parquet`/`journeys.parquet`. If
-`08_add_special_aircraft.py` has been used to inject a manually-anchored aircraft, re-run it after `04`
-to restore that aircraft before re-running `05`/`06`/`07`.
+Whenever `04_flights.py` runs, it does a **full overwrite** of `flights.parquet`/`journeys.parquet`.
 
 Explore intermediate/processed Parquet ad hoc with DuckDB, e.g.:
 ```bash
@@ -65,8 +62,8 @@ Each numbered script is a standalone entry point, but several share logic via tw
   detection constants (`KOSH_LAT`/`KOSH_LON`/`KOSH_RADIUS_NM`/`KOSH_ALT_CEILING_FT`).
 - `pipeline/scan_common.py` — `MultiFileReader` (concatenates a split tar's `.tar.aa`/`.tar.ab`/... parts
   into one stream so `tarfile` can read across them), `tar_parts()`, `iter_trace_members()`. Used by the
-  raw-archive-scanning scripts (`02`, `03`, `08`).
-- `pipeline/viz_common.py` — the shared geometry/segmentation core, used by `04`, `05`, `06`, and `08`:
+  raw-archive-scanning scripts (`02`, `03`).
+- `pipeline/viz_common.py` — the shared geometry/segmentation core, used by `04`, `05`, and `06`:
   - `split_segments()`/`downsample()`/`downsample_capped()` — adaptive downsampling and gap/teleport-based
     path splitting for the *rendered* tracks (dense near KOSH, sparse en route; never draws a straight
     line across a coverage gap or an implausible speed jump).
@@ -75,8 +72,7 @@ Each numbered script is a standalone entry point, but several share logic via tw
     the last of these was added after a real bug where a single bad GPS point inflated a leg's distance
     into the tens of thousands of nm) and snaps each leg's endpoints to the nearest airport.
   - `journeys_for_hex(hexid, legs, anchor="KOSH")` — chains legs into an inbound/outbound journey pair
-    anchored on a given airport (default KOSH). `08_add_special_aircraft.py` calls this with a different
-    `anchor` to manually include an aircraft that never came within range of KOSH itself.
+    anchored on a given airport (default KOSH).
   - `region_of()` — buckets a lat/lon into Local/Northeast/Southeast/Southwest/Northwest relative to KOSH,
     used for the region color mode and stats.
 
@@ -85,11 +81,6 @@ doesn't decompress every aircraft) → `03` extracts full traces for only those 
 `data/interim/traces/day=YYYY-MM-DD/part.parquet` (Hive-partitioned, read via `read_parquet('.../day=*/part.parquet')`)
 → `04` segments legs and chains journeys into `data/processed/{flights,journeys,aircraft}.parquet` → `05`/`06`/`07`
 read those processed Parquet files and the interim traces to produce the static JSON/binary the frontend fetches.
-
-`08_add_special_aircraft.py` is the template for manually adding any aircraft the automated KOSH-proximity
-scan misses: it re-scans the raw tars for one specific hex, runs it through the same `segment_hex`/
-`journeys_for_hex` logic with a custom anchor airport, and appends the result directly into the processed
-Parquet files (replacing any prior rows for that hex, so it's safe to re-run).
 
 ## Viz architecture (`viz/src/main.ts`)
 
