@@ -3,6 +3,7 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import { MapboxOverlay } from "@deck.gl/mapbox";
 import { TripsLayer } from "@deck.gl/geo-layers";
 import { IconLayer, PolygonLayer, ScatterplotLayer, TextLayer } from "@deck.gl/layers";
+import { PathStyleExtension } from "@deck.gl/extensions";
 
 type RGB = [number, number, number];
 
@@ -138,6 +139,8 @@ interface Segment {
   t0: number;
   t1: number;
   day: string;
+  /** Set only on gap-connector entries: the real elapsed time (s) the dash bridges. */
+  gapDurationS?: number;
 }
 
 type Position = [number, number];
@@ -148,6 +151,7 @@ interface LegSegment {
   timestamps: number[];
   t0: number;
   t1: number;
+  gapDurationS?: number;
 }
 
 interface AircraftIndexRow {
@@ -173,6 +177,7 @@ interface AircraftLeg {
   to: string | null;
   nm: number;
   path: [number, number, number, number][]; // t_rel, lon, lat, alt_ft
+  segs: [number, number][]; // coverage-gap breaks within this leg's path
 }
 
 interface AircraftDetail {
@@ -244,7 +249,15 @@ async function loadData() {
   ]);
   const f = new Float32Array(bin);
   const segments: Segment[] = [];
+  // A journey's segs are cut wherever the trace has a coverage gap or a
+  // teleport jump (see split_segments in the pipeline) — nothing is drawn
+  // between them by default. Bridge each pair with a dashed "gap connector"
+  // so the map still shows the aircraft continuing, without implying we
+  // know its actual position during the gap.
+  const gapConnectors: Segment[] = [];
   for (const meta of manifest.journeys) {
+    let prevEnd: [number, number] | null = null;
+    let prevEndT = 0;
     for (const [off, n] of meta.segs) {
       const path: [number, number][] = new Array(n);
       const timestamps: number[] = new Array(n);
@@ -255,10 +268,23 @@ async function loadData() {
       }
       const t0 = timestamps[0];
       const t1 = timestamps[n - 1];
+      if (prevEnd) {
+        gapConnectors.push({
+          meta,
+          path: [prevEnd, path[0]],
+          timestamps: [prevEndT, t0],
+          t0: prevEndT,
+          t1: t0,
+          day: chicagoDayKey(manifest.window_start + prevEndT),
+          gapDurationS: t0 - prevEndT,
+        });
+      }
       segments.push({ meta, path, timestamps, t0, t1, day: chicagoDayKey(manifest.window_start + t0) });
+      prevEnd = path[n - 1];
+      prevEndT = t1;
     }
   }
-  return { manifest, segments };
+  return { manifest, segments, gapConnectors };
 }
 
 function fmtClock(epochS: number): string {
@@ -420,6 +446,19 @@ interface TimeLayerStyle {
   trailOpacity?: number;
   trailWidth?: number;
   trailLength?: number;
+  dashed?: boolean;
+}
+
+const DASH_EXTENSIONS = [new PathStyleExtension({ dash: true })];
+// Gaps longer than this read as a probable coverage hole (e.g. the stretches
+// of the country adsb.lol tracks poorly) rather than a short blip — drawn
+// sparser and dimmer so a viewer doesn't mistake the dash for real track.
+const LONG_GAP_S = 3600;
+const SHORT_GAP_DASH: [number, number] = [3, 2];
+const LONG_GAP_DASH: [number, number] = [1, 3];
+
+function gapDurationOf(d: unknown): number | undefined {
+  return (d as { gapDurationS?: number }).gapDurationS;
 }
 
 /**
@@ -441,6 +480,20 @@ function timeLayers<T>(
   windowEnd: number,
   style: TimeLayerStyle = {}
 ) {
+  const dashProps = style.dashed
+    ? {
+        getDashArray: (d: T) => ((gapDurationOf(d) ?? 0) > LONG_GAP_S ? LONG_GAP_DASH : SHORT_GAP_DASH),
+        dashJustified: true,
+        extensions: DASH_EXTENSIONS,
+      }
+    : {};
+  const effectiveGetColor = style.dashed
+    ? (d: T): RGB | [number, number, number, number] => {
+        const [r, g, b] = getColor(d);
+        const dur = gapDurationOf(d);
+        return dur !== undefined && dur > LONG_GAP_S ? [r, g, b, 70] : [r, g, b, 190];
+      }
+    : getColor;
   if (frozen) {
     return [
       new TripsLayer<T>({
@@ -448,12 +501,13 @@ function timeLayers<T>(
         data,
         getPath,
         getTimestamps,
-        getColor,
+        getColor: effectiveGetColor,
         currentTime: windowEnd,
         trailLength: windowEnd,
         fadeTrail: false,
         widthMinPixels: style.trailWidth ?? 2,
         opacity: style.trailOpacity ?? 0.85,
+        ...dashProps,
       }),
     ];
   }
@@ -463,24 +517,26 @@ function timeLayers<T>(
       data,
       getPath,
       getTimestamps,
-      getColor,
+      getColor: effectiveGetColor,
       currentTime: t,
       trailLength: windowEnd,
       fadeTrail: false,
       widthMinPixels: 1,
       opacity: style.breadcrumbOpacity ?? 0.15,
+      ...dashProps,
     }),
     new TripsLayer<T>({
       id: `${idPrefix}-trail`,
       data,
       getPath,
       getTimestamps,
-      getColor,
+      getColor: effectiveGetColor,
       currentTime: t,
       trailLength: style.trailLength ?? 1200,
       fadeTrail: true,
       widthMinPixels: style.trailWidth ?? 2,
       opacity: style.trailOpacity ?? 0.9,
+      ...dashProps,
     }),
   ];
 }
@@ -708,7 +764,7 @@ function parseInitialState(): InitialState {
 }
 
 async function main() {
-  const { manifest, segments } = await loadData();
+  const { manifest, segments, gapConnectors } = await loadData();
   const T0 = 0;
   const T1 = manifest.window_end - manifest.window_start;
   let activeT0 = T0;
@@ -750,6 +806,7 @@ async function main() {
   const dayKeys = Array.from(new Set(segments.map((s) => s.day))).sort();
   let dayFilter: string = initial.day && dayKeys.includes(initial.day) ? initial.day : "all";
   let filteredSegments: Segment[] = segments;
+  let filteredGapConnectors: Segment[] = gapConnectors;
   let selection: Selection | null = null;
   // A fresh selection starts "frozen" (full route revealed, clock paused).
   // Pressing play or dragging the slider unfreezes it so play/scrub animate
@@ -845,9 +902,10 @@ async function main() {
   }
 
   function applyFilters() {
-    filteredSegments = segments.filter(
-      (s) => (dirFilter === "all" || s.meta.dir === dirFilter) && (dayFilter === "all" || s.day === dayFilter)
-    );
+    const keep = (s: Segment) =>
+      (dirFilter === "all" || s.meta.dir === dirFilter) && (dayFilter === "all" || s.day === dayFilter);
+    filteredSegments = segments.filter(keep);
+    filteredGapConnectors = gapConnectors.filter(keep);
   }
 
   updateDayRange();
@@ -1016,7 +1074,22 @@ async function main() {
         t,
         map.getZoom()
       );
-      return [...terminatorLayers(t), breadcrumbs, trails, ...planes, ...koshLayers];
+      // Dashed bridges across coverage gaps/teleport cuts within a journey —
+      // same color, dimmer, so the aircraft reads as continuing rather than
+      // vanishing where adsb.lol coverage drops out (e.g. much of the west).
+      // Gaps over LONG_GAP_S get an even sparser/dimmer dash (see timeLayers).
+      const gapLayers = timeLayers<Segment>(
+        "gap",
+        filteredGapConnectors,
+        (d) => d.path,
+        (d) => d.timestamps,
+        (d) => colorFor(d.meta, colorMode),
+        false,
+        t,
+        T1,
+        { breadcrumbOpacity: 0.03, trailOpacity: 0.5, trailWidth: 1.5, trailLength: 1200, dashed: true }
+      );
+      return [...terminatorLayers(t), breadcrumbs, trails, ...gapLayers, ...planes, ...koshLayers];
     }
 
     // Selection active: isolate — background layers are replaced entirely by
@@ -1030,26 +1103,72 @@ async function main() {
 
     if (selection.kind === "aircraft") {
       const det = selection.detail;
-      const legSegments: LegSegment[] = det.legs.map((leg) => {
-        const path: Position[] = leg.path.map((p) => [p[1], p[2]]);
-        const timestamps = leg.path.map((p) => p[0]);
-        return { leg, path, timestamps, t0: timestamps[0], t1: timestamps[timestamps.length - 1] };
-      });
+      const toPos = (p: [number, number, number, number]): Position => [p[1], p[2]];
+      const legColor = (d: LegSegment) =>
+        d.leg.to === "KOSH" ? KOSH_LEG : d.leg.from === "KOSH" ? DEP_LEG : HIGHLIGHT_LEG;
+
+      // Each leg's own path can still contain coverage gaps/teleport cuts
+      // (leg.segs, mirroring the main journey's segs) — split those into
+      // their own solid sub-segments and bridge them with a dashed
+      // connector, same as the main timelapse, instead of drawing one
+      // continuous leg path straight across missing data.
+      const legSegments: LegSegment[] = [];
+      const legGapConnectors: LegSegment[] = [];
+      for (const leg of det.legs) {
+        const segs = leg.segs.length ? leg.segs : ([[0, leg.path.length]] as [number, number][]);
+        let prevEnd: Position | null = null;
+        let prevEndT = 0;
+        for (const [off, n] of segs) {
+          const pts = leg.path.slice(off, off + n);
+          const path = pts.map(toPos);
+          const timestamps = pts.map((p) => p[0]);
+          if (prevEnd) {
+            legGapConnectors.push({
+              leg,
+              path: [prevEnd, path[0]],
+              timestamps: [prevEndT, timestamps[0]],
+              t0: prevEndT,
+              t1: timestamps[0],
+              gapDurationS: timestamps[0] - prevEndT,
+            });
+          }
+          legSegments.push({
+            leg,
+            path,
+            timestamps,
+            t0: timestamps[0],
+            t1: timestamps[timestamps.length - 1],
+          });
+          prevEnd = path[path.length - 1];
+          prevEndT = timestamps[timestamps.length - 1];
+        }
+      }
       extraLayers.push(
         ...timeLayers<LegSegment>(
           "aircraft",
           legSegments,
           (d) => d.path,
           (d) => d.timestamps,
-          (d) => (d.leg.to === "KOSH" ? KOSH_LEG : d.leg.from === "KOSH" ? DEP_LEG : HIGHLIGHT_LEG),
+          legColor,
           selectionFrozen,
           t,
           T1,
           { breadcrumbOpacity: 0.25, trailOpacity: 0.95, trailWidth: 3, trailLength: 1800 }
         ),
+        ...timeLayers<LegSegment>(
+          "aircraft-gap",
+          legGapConnectors,
+          (d) => d.path,
+          (d) => d.timestamps,
+          legColor,
+          selectionFrozen,
+          t,
+          T1,
+          { breadcrumbOpacity: 0.15, trailOpacity: 0.6, trailWidth: 2, trailLength: 1800, dashed: true }
+        ),
         new ScatterplotLayer({
           id: "aircraft-stops",
-          data: legSegments.flatMap((d) => [d.path[0], d.path[d.path.length - 1]]),
+          data: det.legs.flatMap((leg) => [toPos(leg.path[0]), toPos(leg.path[leg.path.length - 1])]),
           getPosition: (d: Position) => d,
           getFillColor: [255, 255, 255, 230],
           getLineColor: [11, 11, 11, 200],
@@ -1077,6 +1196,7 @@ async function main() {
           : selection.matches.map((m) => m.hex)
       );
       const matched = segments.filter((s) => hexes.has(s.meta.hex));
+      const matchedGaps = gapConnectors.filter((s) => hexes.has(s.meta.hex));
       extraLayers.push(
         ...timeLayers<Segment>(
           "matched",
@@ -1088,6 +1208,17 @@ async function main() {
           t,
           T1,
           { breadcrumbOpacity: 0.15, trailOpacity: 0.9, trailWidth: 2, trailLength: 1200 }
+        ),
+        ...timeLayers<Segment>(
+          "matched-gap",
+          matchedGaps,
+          (d) => d.path,
+          (d) => d.timestamps,
+          (d) => colorFor(d.meta, colorMode),
+          selectionFrozen,
+          t,
+          T1,
+          { breadcrumbOpacity: 0.1, trailOpacity: 0.6, trailWidth: 1.5, trailLength: 1200, dashed: true }
         ),
         ...(selectionFrozen
           ? []

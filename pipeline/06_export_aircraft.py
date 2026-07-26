@@ -90,11 +90,17 @@ def main() -> None:
             jts, jlat, jlon, jtrk = ts_all[m], lat_all[m], lon_all[m], trk_all[m]
             jalt = alt_all[m]
             bounds = split_segments(jts, jlat, jlon)
+            # Coverage gaps/teleports inside a leg must stay visible as breaks
+            # in `path` (via `segs`) rather than silently concatenated — the
+            # frontend previously drew a straight interpolated line across
+            # them since this loop just appended every sub-run into one list.
             path = []
+            segs = []
             for s, e in zip(bounds[:-1], bounds[1:]):
                 if e - s < 2:
                     continue
                 i = downsample_capped(jts[s:e], jlat[s:e], jlon[s:e], jtrk[s:e], MAX_PTS_PER_LEG)
+                seg_start = len(path)
                 for k in i:
                     a = jalt[s:e][k]
                     alt_ft = 0.0 if np.isnan(a) or a < 0 else float(a)
@@ -106,6 +112,7 @@ def main() -> None:
                             round(alt_ft),
                         ]
                     )
+                segs.append([seg_start, len(path) - seg_start])
             leg_out.append(
                 {
                     "idx": leg_idx,
@@ -116,6 +123,7 @@ def main() -> None:
                     "to": to_apt,
                     "nm": path_nm,
                     "path": path,
+                    "segs": segs,
                 }
             )
         if not leg_out:
