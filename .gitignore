@@ -1,5 +1,4 @@
-data/
-viz/public/data/
+/data/
 .venv/
 __pycache__/
 *.pyc

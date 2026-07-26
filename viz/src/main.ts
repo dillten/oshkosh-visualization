@@ -791,7 +791,11 @@ async function main() {
     style: "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
     center: [-90.5, 41.5],
     zoom: 4.6,
-    attributionControl: { compact: true },
+    attributionControl: {
+      compact: true,
+      customAttribution:
+        'Flight data © <a href="https://adsb.lol" target="_blank">adsb.lol</a> (CC0/ODbL) · Airports © <a href="https://ourairports.com" target="_blank">OurAirports</a>',
+    },
   });
 
   const overlay = new MapboxOverlay({ interleaved: false, layers: [] });
