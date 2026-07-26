@@ -2,7 +2,7 @@ import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { MapboxOverlay } from "@deck.gl/mapbox";
 import { TripsLayer } from "@deck.gl/geo-layers";
-import { PolygonLayer, ScatterplotLayer, TextLayer } from "@deck.gl/layers";
+import { IconLayer, PolygonLayer, ScatterplotLayer, TextLayer } from "@deck.gl/layers";
 
 type RGB = [number, number, number];
 
@@ -137,6 +137,7 @@ interface Segment {
   timestamps: number[];
   t0: number;
   t1: number;
+  day: string;
 }
 
 type Position = [number, number];
@@ -227,6 +228,15 @@ type Selection =
 
 // ---------- helpers ----------
 
+function chicagoDayKey(epochS: number): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Chicago",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date(epochS * 1000));
+}
+
 async function loadData() {
   const [manifest, bin] = await Promise.all([
     fetch("data/manifest.json").then((r) => r.json() as Promise<Manifest>),
@@ -243,7 +253,9 @@ async function loadData() {
         timestamps[i] = f[base];
         path[i] = [f[base + 1], f[base + 2]];
       }
-      segments.push({ meta, path, timestamps, t0: timestamps[0], t1: timestamps[n - 1] });
+      const t0 = timestamps[0];
+      const t1 = timestamps[n - 1];
+      segments.push({ meta, path, timestamps, t0, t1, day: chicagoDayKey(manifest.window_start + t0) });
     }
   }
   return { manifest, segments };
@@ -473,6 +485,104 @@ function timeLayers<T>(
   ];
 }
 
+// ---------- airplane icons (shown once zoomed in close enough to read them) ----------
+
+const PLANE_ICON_SIZE = 64;
+const PLANE_ICON_MIN_ZOOM = 7;
+
+/** Draws a simple top-down aircraft silhouette, nose pointing up (north),
+ * onto an offscreen canvas — used as a single-icon deck.gl IconLayer atlas
+ * (mask:true so getColor can tint it, matching the trails' own coloring). */
+function buildPlaneIconAtlas(): string {
+  const canvas = document.createElement("canvas");
+  canvas.width = PLANE_ICON_SIZE;
+  canvas.height = PLANE_ICON_SIZE;
+  const ctx = canvas.getContext("2d")!;
+  ctx.fillStyle = "#fff";
+  const c = PLANE_ICON_SIZE / 2;
+  ctx.beginPath();
+  ctx.moveTo(c, c - 26);
+  ctx.lineTo(c + 4, c - 6);
+  ctx.lineTo(c + 24, c + 8);
+  ctx.lineTo(c + 24, c + 14);
+  ctx.lineTo(c + 5, c + 7);
+  ctx.lineTo(c + 6, c + 20);
+  ctx.lineTo(c + 13, c + 26);
+  ctx.lineTo(c + 13, c + 30);
+  ctx.lineTo(c, c + 24);
+  ctx.lineTo(c - 13, c + 30);
+  ctx.lineTo(c - 13, c + 26);
+  ctx.lineTo(c - 6, c + 20);
+  ctx.lineTo(c - 5, c + 7);
+  ctx.lineTo(c - 24, c + 14);
+  ctx.lineTo(c - 24, c + 8);
+  ctx.lineTo(c - 4, c - 6);
+  ctx.closePath();
+  ctx.fill();
+  return canvas.toDataURL();
+}
+
+const PLANE_ICON_ATLAS = buildPlaneIconAtlas();
+const PLANE_ICON_MAPPING = {
+  plane: { x: 0, y: 0, width: PLANE_ICON_SIZE, height: PLANE_ICON_SIZE, mask: true },
+};
+
+/** Linearly interpolates a point's position and heading along a path at time
+ * `t` (same rough-approximation tone as the rest of the file — a cos(lat)
+ * correction on the longitude delta, not a true great-circle bearing). */
+function interpAt(path: Position[], timestamps: number[], t: number): { pos: [number, number]; heading: number } | null {
+  if (path.length < 2 || t < timestamps[0] || t > timestamps[timestamps.length - 1]) return null;
+  let i = 0;
+  while (i < timestamps.length - 2 && timestamps[i + 1] < t) i++;
+  const t0 = timestamps[i], t1 = timestamps[i + 1];
+  const p0 = path[i], p1 = path[i + 1];
+  const frac = t1 > t0 ? (t - t0) / (t1 - t0) : 0;
+  const lon = p0[0] + (p1[0] - p0[0]) * frac;
+  const lat = p0[1] + (p1[1] - p0[1]) * frac;
+  const dLon = p1[0] - p0[0];
+  const dLat = p1[1] - p0[1];
+  const latRad = (lat * Math.PI) / 180;
+  const heading = (Math.atan2(dLon * Math.cos(latRad), dLat) * 180) / Math.PI;
+  return { pos: [lon, lat], heading };
+}
+
+/** Zoom-gated plane-icon layer for a set of currently in-flight items — reused
+ * for the main timelapse and for aircraft/airport/type selections alike so
+ * the "planes on the lines" effect reads the same everywhere. */
+function makePlaneIconLayer<T>(
+  id: string,
+  items: T[],
+  getPath: (d: T) => Position[],
+  getTimestamps: (d: T) => number[],
+  getColor: (d: T) => RGB,
+  t: number,
+  zoom: number
+): any[] {
+  if (zoom < PLANE_ICON_MIN_ZOOM) return [];
+  const data: { pos: [number, number]; heading: number; color: RGB }[] = [];
+  for (const item of items) {
+    const timestamps = getTimestamps(item);
+    const hit = interpAt(getPath(item), timestamps, t);
+    if (hit) data.push({ pos: hit.pos, heading: hit.heading, color: getColor(item) });
+  }
+  if (data.length === 0) return [];
+  return [
+    new IconLayer({
+      id,
+      data,
+      iconAtlas: PLANE_ICON_ATLAS,
+      iconMapping: PLANE_ICON_MAPPING,
+      getIcon: () => "plane",
+      getPosition: (d: { pos: [number, number] }) => d.pos,
+      getAngle: (d: { heading: number }) => -d.heading,
+      getColor: (d: { color: RGB }) => d.color,
+      getSize: 18,
+      sizeUnits: "pixels",
+      billboard: true,
+    }),
+  ];
+}
+
 function renderLegend(mode: ColorMode) {
   const el = document.getElementById("legend")!;
   const entries =
@@ -558,12 +668,16 @@ async function renderOverview(body: HTMLElement) {
 
 // ---------- main ----------
 
+type DirFilter = "all" | "inbound" | "outbound";
+
 interface InitialState {
   t?: number;
   speed?: number;
   color?: ColorMode;
   radar?: boolean;
   night?: boolean;
+  dir?: DirFilter;
+  day?: string;
   sel?: { kind: "aircraft" | "airport" | "type"; value: string };
 }
 
@@ -576,6 +690,10 @@ function parseInitialState(): InitialState {
   if (color === "dir" || color === "region") out.color = color;
   if (params.get("radar") === "1") out.radar = true;
   if (params.get("night") === "1") out.night = true;
+  const dir = params.get("dir");
+  if (dir === "inbound" || dir === "outbound") out.dir = dir;
+  const day = params.get("day");
+  if (day) out.day = day;
   const sel = params.get("sel");
   if (sel) {
     const i = sel.indexOf(":");
@@ -593,6 +711,8 @@ async function main() {
   const { manifest, segments } = await loadData();
   const T0 = 0;
   const T1 = manifest.window_end - manifest.window_start;
+  let activeT0 = T0;
+  let activeT1 = T1;
   const journeys = manifest.journeys;
   const initial = parseInitialState();
 
@@ -626,6 +746,10 @@ async function main() {
   let wasPlayingBeforeSelection = true;
   let speed = initial.speed ?? 1800;
   let colorMode: ColorMode = initial.color ?? "dir";
+  let dirFilter: DirFilter = initial.dir ?? "all";
+  const dayKeys = Array.from(new Set(segments.map((s) => s.day))).sort();
+  let dayFilter: string = initial.day && dayKeys.includes(initial.day) ? initial.day : "all";
+  let filteredSegments: Segment[] = segments;
   let selection: Selection | null = null;
   // A fresh selection starts "frozen" (full route revealed, clock paused).
   // Pressing play or dragging the slider unfreezes it so play/scrub animate
@@ -670,6 +794,8 @@ async function main() {
   const scrub = document.getElementById("scrub") as HTMLInputElement;
   const speedSel = document.getElementById("speed") as HTMLSelectElement;
   const colorSel = document.getElementById("colorby") as HTMLSelectElement;
+  const dirSel = document.getElementById("dirby") as HTMLSelectElement;
+  const daySel = document.getElementById("dayby") as HTMLSelectElement;
   const radarToggle = document.getElementById("radar-toggle") as HTMLInputElement;
   const nightToggle = document.getElementById("night-toggle") as HTMLInputElement;
   const linkBtn = document.getElementById("link-toggle") as HTMLButtonElement;
@@ -683,14 +809,53 @@ async function main() {
   scrub.value = String(Math.floor(current));
   speedSel.value = String(speed);
   colorSel.value = colorMode;
+  dirSel.value = dirFilter;
+  for (const day of dayKeys) {
+    const opt = document.createElement("option");
+    opt.value = day;
+    opt.textContent = new Date(day + "T12:00:00Z").toLocaleDateString("en-US", {
+      weekday: "short",
+      month: "short",
+      day: "numeric",
+    });
+    daySel.appendChild(opt);
+  }
+  daySel.value = dayFilter;
   radarToggle.checked = radarEnabled;
   document.getElementById("radar-credit")!.hidden = !radarEnabled;
   nightToggle.checked = nightEnabled;
   renderLegend(colorMode);
 
+  function dayBounds(day: string): [number, number] {
+    let lo = Infinity, hi = -Infinity;
+    for (const s of segments) {
+      if (s.day === day) {
+        if (s.t0 < lo) lo = s.t0;
+        if (s.t1 > hi) hi = s.t1;
+      }
+    }
+    return [lo, hi];
+  }
+
+  function updateDayRange() {
+    [activeT0, activeT1] = dayFilter === "all" ? [T0, T1] : dayBounds(dayFilter);
+    scrub.min = String(Math.floor(activeT0));
+    scrub.max = String(Math.ceil(activeT1));
+    current = Math.min(activeT1, Math.max(activeT0, current));
+  }
+
+  function applyFilters() {
+    filteredSegments = segments.filter(
+      (s) => (dirFilter === "all" || s.meta.dir === dirFilter) && (dayFilter === "all" || s.day === dayFilter)
+    );
+  }
+
+  updateDayRange();
+  applyFilters();
+
   function activeCount(t: number): number {
     let n = 0;
-    for (const s of segments) if (s.t0 <= t && t <= s.t1) n++;
+    for (const s of filteredSegments) if (s.t0 <= t && t <= s.t1) n++;
     return n;
   }
 
@@ -818,7 +983,7 @@ async function main() {
     if (!selection) {
       const breadcrumbs = new TripsLayer<Segment>({
         id: "breadcrumbs",
-        data: segments,
+        data: filteredSegments,
         getPath: (d) => d.path,
         getTimestamps: (d) => d.timestamps,
         getColor: (d) => colorFor(d.meta, colorMode),
@@ -831,7 +996,7 @@ async function main() {
       });
       const trails = new TripsLayer<Segment>({
         id: "trails",
-        data: segments,
+        data: filteredSegments,
         getPath: (d) => d.path,
         getTimestamps: (d) => d.timestamps,
         getColor: (d) => colorFor(d.meta, colorMode),
@@ -842,7 +1007,16 @@ async function main() {
         opacity: 0.9,
         updateTriggers: { getColor: colorMode },
       });
-      return [...terminatorLayers(t), breadcrumbs, trails, ...koshLayers];
+      const planes = makePlaneIconLayer<Segment>(
+        "planes",
+        filteredSegments,
+        (d) => d.path,
+        (d) => d.timestamps,
+        (d) => colorFor(d.meta, colorMode),
+        t,
+        map.getZoom()
+      );
+      return [...terminatorLayers(t), breadcrumbs, trails, ...planes, ...koshLayers];
     }
 
     // Selection active: isolate — background layers are replaced entirely by
@@ -883,7 +1057,18 @@ async function main() {
           stroked: true,
           radiusMinPixels: 3,
           radiusMaxPixels: 5,
-        })
+        }),
+        ...(selectionFrozen
+          ? []
+          : makePlaneIconLayer<LegSegment>(
+              "aircraft-planes",
+              legSegments,
+              (d) => d.path,
+              (d) => d.timestamps,
+              (d) => (d.leg.to === "KOSH" ? KOSH_LEG : d.leg.from === "KOSH" ? DEP_LEG : HIGHLIGHT_LEG),
+              t,
+              map.getZoom()
+            ))
       );
     } else {
       const hexes = new Set(
@@ -903,7 +1088,18 @@ async function main() {
           t,
           T1,
           { breadcrumbOpacity: 0.15, trailOpacity: 0.9, trailWidth: 2, trailLength: 1200 }
-        )
+        ),
+        ...(selectionFrozen
+          ? []
+          : makePlaneIconLayer<Segment>(
+              "matched-planes",
+              matched,
+              (d) => d.path,
+              (d) => d.timestamps,
+              (d) => colorFor(d.meta, colorMode),
+              t,
+              map.getZoom()
+            ))
       );
       if (selection.kind === "airport" && selection.detail.lat != null) {
         extraLayers.push(
@@ -939,6 +1135,8 @@ async function main() {
     params.set("color", colorMode);
     if (radarEnabled) params.set("radar", "1");
     if (nightEnabled) params.set("night", "1");
+    if (dirFilter !== "all") params.set("dir", dirFilter);
+    if (dayFilter !== "all") params.set("day", dayFilter);
     if (selection) {
       if (selection.kind === "aircraft") params.set("sel", `aircraft:${selection.hex}`);
       else if (selection.kind === "airport") params.set("sel", `airport:${selection.ident}`);
@@ -973,7 +1171,7 @@ async function main() {
         ? "Showing the full route — press play or drag the slider to animate it"
         : `${selectionActiveCount(t)} active of ${selectionTotalCount()} matching`;
     } else {
-      counts.textContent = `${activeCount(t)} aircraft in motion · ${journeys.length} journeys total`;
+      counts.textContent = `${activeCount(t)} aircraft in motion · ${filteredSegments.length} journeys total`;
     }
     scrub.value = String(Math.floor(t));
     if (performance.now() - lastUrlSync > 3000) updateUrl();
@@ -991,12 +1189,26 @@ async function main() {
     render(current);
     updateUrl();
   });
+  dirSel.addEventListener("change", () => {
+    dirFilter = dirSel.value as DirFilter;
+    applyFilters();
+    render(current);
+    updateUrl();
+  });
+  daySel.addEventListener("change", () => {
+    dayFilter = daySel.value;
+    updateDayRange();
+    applyFilters();
+    render(current);
+    updateUrl();
+  });
+
   function frame(now: number) {
     const dt = (now - lastFrame) / 1000;
     lastFrame = now;
     if (playing) {
       current += dt * speed;
-      if (current > T1) current = T0;
+      if (current > activeT1) current = activeT0;
       render(current);
     }
     requestAnimationFrame(frame);
