@@ -610,16 +610,15 @@ function makePlaneIconLayer<T>(
   items: T[],
   getPath: (d: T) => Position[],
   getTimestamps: (d: T) => number[],
-  getColor: (d: T) => RGB,
   t: number,
   zoom: number
 ): any[] {
   if (zoom < PLANE_ICON_MIN_ZOOM) return [];
-  const data: { pos: [number, number]; heading: number; color: RGB }[] = [];
+  const data: { pos: [number, number]; heading: number }[] = [];
   for (const item of items) {
     const timestamps = getTimestamps(item);
     const hit = interpAt(getPath(item), timestamps, t);
-    if (hit) data.push({ pos: hit.pos, heading: hit.heading, color: getColor(item) });
+    if (hit) data.push({ pos: hit.pos, heading: hit.heading });
   }
   if (data.length === 0) return [];
   return [
@@ -631,7 +630,7 @@ function makePlaneIconLayer<T>(
       getIcon: () => "plane",
       getPosition: (d: { pos: [number, number] }) => d.pos,
       getAngle: (d: { heading: number }) => -d.heading,
-      getColor: (d: { color: RGB }) => d.color,
+      getColor: [255, 255, 255],
       getSize: 18,
       sizeUnits: "pixels",
       billboard: true,
@@ -1074,7 +1073,6 @@ async function main() {
         filteredSegments,
         (d) => d.path,
         (d) => d.timestamps,
-        (d) => colorFor(d.meta, colorMode),
         t,
         map.getZoom()
       );
@@ -1188,7 +1186,6 @@ async function main() {
               legSegments,
               (d) => d.path,
               (d) => d.timestamps,
-              (d) => (d.leg.to === "KOSH" ? KOSH_LEG : d.leg.from === "KOSH" ? DEP_LEG : HIGHLIGHT_LEG),
               t,
               map.getZoom()
             ))
@@ -1231,7 +1228,6 @@ async function main() {
               matched,
               (d) => d.path,
               (d) => d.timestamps,
-              (d) => colorFor(d.meta, colorMode),
               t,
               map.getZoom()
             ))

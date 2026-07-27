@@ -14,7 +14,7 @@ REFERENCE_DIR = DATA_DIR / "reference"
 # true origin for aircraft that arrived at KOSH on the first show days.
 LEAD_IN_START = date(2026, 7, 14)
 SHOW_START = date(2026, 7, 16)
-LAST_COMPLETE_DAY = date(2026, 7, 24)
+LAST_COMPLETE_DAY = date(2026, 7, 25)
 
 
 def all_days() -> list[date]:
