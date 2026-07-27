@@ -15,6 +15,37 @@
 html, body, #map { height: 100%; width: 100%; background: var(--page); overflow: hidden; }
 #map { position: relative; z-index: 0; }
 
+#loading-screen {
+  position: absolute;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  background: var(--page);
+  color: var(--text-primary);
+  transition: opacity 0.4s ease;
+}
+#loading-screen.hidden { opacity: 0; pointer-events: none; }
+#loading-title { font-size: 16px; font-weight: 600; letter-spacing: 0.01em; }
+#loading-bar-track {
+  width: min(320px, 70vw);
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+}
+#loading-bar-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--inbound);
+  border-radius: 3px;
+  transition: width 0.15s ease;
+}
+#loading-label { font-size: 12px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+
 #hud {
   position: absolute;
   top: 16px;

@@ -242,11 +242,53 @@ function chicagoDayKey(epochS: number): string {
   }).format(new Date(epochS * 1000));
 }
 
-async function loadData() {
-  const [manifest, bin] = await Promise.all([
-    fetch("data/manifest.json").then((r) => r.json() as Promise<Manifest>),
-    fetch("data/points.bin").then((r) => r.arrayBuffer()),
-  ]);
+/** Fetches all of the app's bulk startup data (manifest, the binary track
+ * points, and the two search indexes) in parallel, reporting combined
+ * byte-level download progress via `onProgress` (0..1) — points.bin alone is
+ * tens of MB, so this is the dominant cost of getting the map on screen. */
+async function loadAllData(onProgress: (frac: number) => void) {
+  const urls = ["data/manifest.json", "data/points.bin", "data/aircraft_index.json", "data/airport_index.json"];
+  const responses = await Promise.all(urls.map((u) => fetch(u)));
+  const totals = responses.map((r) => Number(r.headers.get("content-length")) || 0);
+  const totalBytes = totals.reduce((a, b) => a + b, 0) || 1;
+  const loaded = new Array(urls.length).fill(0);
+  const report = () => onProgress(loaded.reduce((a, b) => a + b, 0) / totalBytes);
+  const buffers = await Promise.all(
+    responses.map(async (res, i) => {
+      if (!res.body) {
+        const buf = await res.arrayBuffer();
+        loaded[i] = buf.byteLength;
+        report();
+        return buf;
+      }
+      const reader = res.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let n = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        n += value.length;
+        loaded[i] = n;
+        report();
+      }
+      const out = new Uint8Array(n);
+      let off = 0;
+      for (const c of chunks) {
+        out.set(c, off);
+        off += c.length;
+      }
+      return out.buffer;
+    })
+  );
+  const [manifestBuf, pointsBuf, aircraftIndexBuf, airportIndexBuf] = buffers;
+  const manifest: Manifest = JSON.parse(new TextDecoder().decode(manifestBuf));
+  const aircraftIndexRaw = JSON.parse(new TextDecoder().decode(aircraftIndexBuf));
+  const airportIndexRaw = JSON.parse(new TextDecoder().decode(airportIndexBuf));
+  return { manifest, pointsBuf, aircraftIndexRaw, airportIndexRaw };
+}
+
+function buildSegments(manifest: Manifest, bin: ArrayBuffer) {
   const f = new Float32Array(bin);
   const segments: Segment[] = [];
   // A journey's segs are cut wherever the trace has a coverage gap or a
@@ -763,7 +805,15 @@ function parseInitialState(): InitialState {
 }
 
 async function main() {
-  const { manifest, segments, gapConnectors } = await loadData();
+  const loadingScreen = document.getElementById("loading-screen")!;
+  const loadingBarFill = document.getElementById("loading-bar-fill") as HTMLElement;
+  const loadingPct = document.getElementById("loading-pct")!;
+  const { manifest, pointsBuf, aircraftIndexRaw, airportIndexRaw } = await loadAllData((frac) => {
+    const pct = Math.round(Math.min(1, frac) * 100);
+    loadingBarFill.style.width = `${pct}%`;
+    loadingPct.textContent = `${pct}%`;
+  });
+  const { segments, gapConnectors } = buildSegments(manifest, pointsBuf);
   const T0 = 0;
   const T1 = manifest.window_end - manifest.window_start;
   let activeT0 = T0;
@@ -771,10 +821,6 @@ async function main() {
   const journeys = manifest.journeys;
   const initial = parseInitialState();
 
-  const [aircraftIndexRaw, airportIndexRaw] = await Promise.all([
-    fetch("data/aircraft_index.json").then((r) => r.json()),
-    fetch("data/airport_index.json").then((r) => r.json()),
-  ]);
   const aircraftIndex: AircraftIndexRow[] = aircraftIndexRaw.aircraft;
   const airportIndex: AirportIndexRow[] = airportIndexRaw.airports;
   const distinctTypes = Array.from(
@@ -1807,9 +1853,12 @@ async function main() {
 
   render(current);
   requestAnimationFrame(frame);
+  loadingScreen.classList.add("hidden");
 }
 
 main().catch((e) => {
   document.getElementById("counts")!.textContent = `failed to load data: ${e}`;
+  const loadingLabel = document.getElementById("loading-label");
+  if (loadingLabel) loadingLabel.textContent = `failed to load data: ${e}`;
   console.error(e);
 });
