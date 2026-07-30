@@ -42,3 +42,21 @@ KOSH_ELEV_FT = 808
 # arrival altitudes (1800/2300 ft) while excluding en-route overflights.
 KOSH_RADIUS_NM = 8.0
 KOSH_ALT_CEILING_FT = 3500
+
+# Fisk VFR arrival corridor: published EAA AirVenture NOTAM VFR arrival route,
+# Endeavor Bridge -> Puckaway Lake -> Green Lake -> Ripon -> Fisk (single-file
+# railroad-track approach; nominal 1800 ft MSL / 90 KIAS, faster traffic 2300
+# ft / 135 kt, >=0.5 nm in-trail spacing). Coordinates from published VFR
+# waypoints; the procedure ends at Fisk (the runway approach beyond it is out
+# of scope for this analysis).
+CORRIDOR_WAYPOINTS = [
+    ("Endeavor Bridge", 43.7508, -89.4822),
+    ("Puckaway Lake", 43.7403, -89.2247),
+    ("Green Lake", 43.7689, -89.0472),
+    ("Ripon", 43.8381, -88.8444),
+    ("Fisk", 43.9558, -88.6781),
+]
+CORRIDOR_BUFFER_NM = 5.0  # max perpendicular deviation from centerline to keep
+CORRIDOR_MIN_GS = 40  # exclude ground/taxi noise
+CORRIDOR_ALT_CEILING_FT = 4000
+CORRIDOR_TARGETS = {"low": {"alt_ft": 1800, "gs": 90}, "high": {"alt_ft": 2300, "gs": 135}}
