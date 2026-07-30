@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Fisk Arrival Corridor — AirVenture 2026</title>
+    <link rel="stylesheet" href="./src/style.css" />
+  </head>
+  <body class="story-page">
+    <div class="data-banner">
+      <div class="data-banner-inner">
+        <span class="data-banner-icon" aria-hidden="true">&#9432;</span>
+        <p>
+          Built from public ADS-B traces via <a href="https://adsb.lol" target="_blank" rel="noopener">adsb.lol</a>.
+          Two things to keep in mind: altitude here is <strong>uncorrected pressure altitude</strong> (not adjusted
+          for the local altimeter setting), and speed is <strong>ground speed</strong>, not indicated airspeed &mdash;
+          wind can shift both away from what the pilot actually saw in the cockpit.
+        </p>
+      </div>
+    </div>
+    <div class="story">
+      <header class="hero">
+        <div class="hero-text">
+          <div class="eyebrow"><i class="tag"></i>EAA AirVenture &middot; Wittman Regional &middot; KOSH</div>
+          <h1>Fisk Arrival Corridor Analytics</h1>
+          <p class="hero-sub">
+            Every aircraft that flew the published VFR corridor into Oshkosh, checked against the book:
+            1,800 feet and 90 knots, single file, over Ripon and up the railroad tracks to Fisk.
+          </p>
+          <a class="back-pill" href="./index.html">&larr; Full AirVenture timelapse</a>
+        </div>
+        <div class="hero-stats" id="hero-stats"></div>
+      </header>
+
+      <section class="section">
+        <div class="section-label">
+          <div class="eyebrow">The route</div>
+          <h2>Five checkpoints, one railroad track.</h2>
+          <p class="lede">
+            Inbound VFR traffic funnels through Endeavor Bridge, Puckaway Lake and Green Lake, then joins
+            the railroad tracks at Ripon for the final run to Fisk &mdash; the point where Fisk approach
+            takes over on the radio. Distances are measured along that published route, not straight-line.
+          </p>
+        </div>
+        <div class="section-content">
+          <div class="panel"><div id="route-diagram"></div></div>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-label">
+          <div class="eyebrow">The numbers</div>
+          <h2>Two speeds, one railroad track.</h2>
+          <p class="lede" id="numbers-lede">Loading&hellip;</p>
+        </div>
+        <div class="section-content">
+          <div class="tile-grid" id="numbers-grid"></div>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-label">
+          <div class="eyebrow">Speed &amp; altitude</div>
+          <h2>Are pilots flying the published profile?</h2>
+          <p class="lede" id="dist-lede">Loading&hellip;</p>
+        </div>
+        <div class="section-content chart-pair">
+          <div class="panel">
+            <h3>Speed at Fisk</h3>
+            <div id="chart-speed-hist" class="uplot-chart"></div>
+          </div>
+          <div class="panel">
+            <h3>Altitude at Fisk</h3>
+            <div id="chart-alt-hist" class="uplot-chart"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-label">
+          <div class="eyebrow">Along the route</div>
+          <h2>Where pilots slow down.</h2>
+          <p class="lede">
+            Median value at each point along the route, with the middle 50% of traffic shaded. If a
+            slowdown is going to appear anywhere, this is where it would show up.
+          </p>
+        </div>
+        <div class="section-content chart-pair">
+          <div class="panel">
+            <h3>Speed profile</h3>
+            <div id="chart-speed-profile" class="uplot-chart"></div>
+          </div>
+          <div class="panel">
+            <h3>Altitude profile</h3>
+            <div id="chart-alt-profile" class="uplot-chart"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-label">
+          <div class="eyebrow">The rubber band</div>
+          <h2>Slow airplanes compress the line behind them.</h2>
+          <p class="lede" id="gap-lede">Loading&hellip;</p>
+        </div>
+        <div class="section-content">
+          <div class="panel">
+            <div id="chart-gap-scatter" class="uplot-chart"></div>
+            <p class="chart-note">
+              Published minimum spacing is 0.5nm in-trail. Each point is one aircraft's gap to whoever
+              crossed Fisk just before it, plotted against that lead aircraft's own speed. Chart is capped
+              at 2nm to keep the tight, meaningful spacing visible &mdash; a handful of larger gaps aren't shown.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-label">
+          <div class="eyebrow">Watch it happen</div>
+          <h2>Follow one aircraft through the line.</h2>
+          <p class="lede">
+            Search a tail number, or try one of these tight spots, then scrub the slider to watch the
+            gap to the aircraft ahead and behind change from Endeavor Bridge to Fisk. Click any dot on
+            the map to show or hide its type, speed, and altitude.
+          </p>
+          <div class="follow-search">
+            <input type="text" id="follow-search-input" placeholder="Search tail number (e.g. N123AB)&hellip;" autocomplete="off" disabled />
+            <div id="follow-search-results" class="follow-search-results" hidden></div>
+          </div>
+          <div class="follow-examples" id="follow-examples"></div>
+        </div>
+        <div class="section-content">
+          <div class="panel follow-panel" id="follow-panel" hidden>
+            <div class="follow-header">
+              <div class="follow-title" id="follow-title"></div>
+              <div class="follow-sub" id="follow-sub"></div>
+            </div>
+            <div id="follow-map"></div>
+            <div class="follow-legend">
+              <span class="key"><span class="swatch dot" style="background:#3987e5"></span>this aircraft</span>
+              <span class="key"><span class="swatch dot" style="background:#c9c8c1"></span>nearby traffic</span>
+            </div>
+            <input type="range" id="follow-slider" min="0" max="1000" value="0" step="1" />
+            <div class="follow-readouts" id="follow-readouts"></div>
+          </div>
+          <div class="panel follow-empty" id="follow-empty">Search for an aircraft, or pick an example, to get started.</div>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-label">
+          <div class="eyebrow">By type</div>
+          <h2>Speed by type, checkpoint by checkpoint.</h2>
+          <p class="lede">
+            Average speed (with the min&ndash;max range and sample count) at Green Lake, Ripon, and Fisk for
+            every type with at least 5 recorded Fisk crossings &mdash; ranked fastest to slowest at Fisk.
+            Search or page through all of them below.
+          </p>
+        </div>
+        <div class="section-content">
+          <div class="panel">
+            <div class="type-grid-controls">
+              <input type="text" id="type-search-input" class="type-search-input" placeholder="Search type (e.g. RV14, C172)&hellip;" autocomplete="off" />
+              <div class="type-grid-pager">
+                <button id="type-page-prev" type="button" aria-label="Previous page">&larr;</button>
+                <span id="type-page-label"></span>
+                <button id="type-page-next" type="button" aria-label="Next page">&rarr;</button>
+              </div>
+            </div>
+            <div id="type-grid"></div>
+          </div>
+        </div>
+      </section>
+
+      <footer class="story-footer">
+        <p>Projected onto the published EAA AirVenture NOTAM VFR arrival route.</p>
+      </footer>
+    </div>
+    <div id="toast" hidden></div>
+    <script type="module" src="./src/corridor.ts"></script>
+  </body>
+</html>
